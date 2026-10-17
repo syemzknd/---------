@@ -1,0 +1,4675 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+自动化产出简易视频 —— 单文件 Python 版（Node.js 流水线的等价实现）
+
+一句话：DeepSeek 按五幕模板写 YAML 脚本 → DeepSeek 写自包含 Canvas 渲染器 →
+Playwright 逐帧截图 → ffmpeg 合成 → edge-tts 配音 → ASS 特效字幕 → 质检。
+
+本文件把原 WORKFLOW.md 中的工作流、提示词和功能集中到一个程序里：
+  * 节点1  选题 / 资料拆知识点 / 知识点或选题 → 视频脚本（YAML），带内容自检
+  * 节点2  脚本 → 自包含 HTML Canvas 渲染器，带静态审计（契约 / 缓动 / 母题 / 旁白泄漏）
+  * 节点3  Playwright + Chromium 逐帧渲染，ffmpeg 合成无声 H.264
+  * 节点4  edge-tts 逐场景配音、标点规范化、srt/vtt/ASS、关键词高亮、BGM 闪避混音
+  * 节点5  ffprobe / 音量 / 旁白时间窗 / 边缘裁切 / 画面节奏 / 构图占屏 / ASS / 授权清单
+  * 主控   一条命令串起节点1→5，产物按脚本 meta.title 命名
+  * setup  环境检查与安装指引
+
+提示词：prompts/*.md 已内嵌到本文件（PROMPTS 常量），不需要再依赖 prompts/ 目录。
+主题令牌：themes/themes.json 已内嵌（THEMES 常量）。
+
+依赖（用 py -3 安装）：
+  py -3 -m pip install pyyaml edge-tts playwright numpy
+  py -3 -m playwright install chromium        # 若本机还没有 Playwright Chromium
+  # 系统还需要 ffmpeg / ffprobe 在 PATH 上
+
+环境变量：
+  DEEPSEEK_API_KEY        必需，DeepSeek API Key
+  DEEPSEEK_BASE_URL       默认 https://api.deepseek.com
+  DEEPSEEK_MODEL          默认 deepseek-v4-pro（可换 deepseek-flash）
+  DEEPSEEK_MAX_TOKENS     节点1 默认 16384，节点2 默认 65536
+  DEEPSEEK_STALL_TIMEOUT  流式响应停滞超时秒数，默认 240
+  JAMENDO_CLIENT_ID       可选，Jamendo 免费 Client ID（https://devportal.jamendo.com/）
+  JAMENDO_API_BASE        可选，测试时指向本地 mock
+  FFMPEG_BIN / FFPROBE_BIN 可选，指定 ffmpeg / ffprobe 路径
+  EDGE_TTS_CMD            可选，强制指定 edge-tts 命令
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE 可选，指定 Chromium 可执行文件
+
+常用命令：
+  py -3 main.py --topic "选题" --duration 45
+  py -3 main.py --material 资料.txt --index 1
+  py -3 main.py --points output/points.md --index 1
+  py -3 main.py --topics "领域"
+  py -3 main.py --script script.yaml
+  py -3 main.py --script script.yaml --html output/x.html --unique
+  py -3 main.py node1 --topic "选题" --out script.yaml
+  py -3 main.py node2 --script script.yaml --out index.html
+  py -3 main.py render --html index.html --script script.yaml --clean
+  py -3 main.py audio --script script.yaml --video output/x_silent.mp4
+  py -3 main.py qa --script script.yaml --video output/x.mp4
+  py -3 main.py setup --check
+  py -3 main.py --workflow        # 打印完整工作流说明
+  py -3 main.py --list-themes
+  py -3 main.py --help
+
+产物命名：
+  output/<meta.title>.mp4、<meta.title>_silent.mp4、.srt/.vtt/.ass/.audio.json
+  --name 覆盖基名；--unique 重名时追加 _2；--out-dir 换目录。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+# Windows 控制台默认可能是 GBK；统一用 UTF-8 输出，避免中文/符号变成乱码或抛错。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+
+try:
+    import yaml  # PyYAML
+except Exception:  # pragma: no cover - 延迟到真正需要时提示
+    yaml = None
+
+APP_NAME = "自动化产出简易视频 / main.py"
+APP_VERSION = "2.0"
+
+# ---------------------------------------------------------------------------
+# 内嵌提示词与主题
+# ---------------------------------------------------------------------------
+PROMPTS = {
+    'node1_topics': '# 角色\n你是一个短视频选题策划。你为 30–90 秒的可编程动画科普视频找选题，标准只有一个：\n**这条视频能不能戳中观众自己的生活。** 观众不关心冷知识，他们只关心“这说的是不是我了”。\n\n# 任务\n根据用户给出的领域/方向，输出 10 个候选选题。**不要写脚本。**\n\n# 第一优先级：个人相关性（硬性配额）\n10 个候选选题里，**至少 7 个**必须直接关乎下面任意一类：\n\n- 大众日常生活：手机、日历、闹钟、转账、通勤、睡眠、购物、社交\n- 拖延症与行动瘫痪：计划很满、迟迟不开始、越拖越焦虑\n- 认知偏差：以为自己在思考，其实在自我安慰\n- 效率陷阱：越努力越低效、工具越多越忙、时间被切碎\n- 时间管理：截止日期、优先级、精力分配、被偷走的时间\n\n**如果用户给的领域是技术方向，不要直接写技术冷知识。**\n先回答一句：*这件事和普通人的哪件日常小事有关？*\n答不上来就淘汰。例如：\n- “2038 年时间戳” → 手机日历、闹钟、银行转账单上的时间会不会错乱\n- “内存刷新” → 你切出去再切回来的 App，为什么还停在原来的位置\n- “TCP 重传” → 消息发出去只显示一个勾，到底卡在哪\n\n**绝对禁止的选题类型：**\n- 纯技术冷知识（“二进制是什么”“继电器怎么工作”“CPU 有几级流水线”）\n- 纯历史考据、纯硬件参数、纯行业八卦\n- 只有极客才觉得有意思、和生活没有任何摩擦的知识\n- “XX 是什么”“XX 入门”“XX 简介”\n- 观众已经知道答案的疑问句\n- 纯知识清单（“三大特点”“五个步骤”）\n- 没有冲突、没有代价、没有反转的平铺直叙\n\n# 选题过滤器\n每个选题必须同时满足：\n\n1. **反直觉认知差**：观众以为自己知道，其实想反了，或者从来没意识到。\n2. 再至少满足下面任意一条：\n   - **有痛点**：和观众每天做的某件小事直接相关。\n   - **有代价**：背后有一个差点失败、差点晚诞生、差点出事的时刻。\n   - **有反转**：结果和开头的预期相反。\n\n两条只满足一条的选题，不许出现。\n\n# 开头留人（Golden 3s，硬性要求）\n每个选题必须自带一个能在 **3 秒内**把人钉住的钩子，且只能从下面三种里选一种：\n\n1. **极端假设**：把观众扔进一个极端处境。\n   - 例：“如果你只剩 6 个月，你能不能完成你的梦想？”\n2. **扎心拷问**：用第二人称直击日常，让观众心里“咯噔”一下。\n   - 例：“你计划了三小时，真正开始工作的时间有几分钟？”\n3. **预期反转**：先给常识，再一句话掀桌。\n   - 例：“让你更忙的，不是工作，是你给自己定的截止日期。”\n\n**配额（硬性）**：10 个候选里，至少 **3 个**必须用「极端假设」开局，\n三种类型都要出现；每个钩子必须 ≤18 字，并且是一句能直接念出来的第一句旁白，\n不能写成“用悬念吸引观众”这类描述。\n\n**禁止平铺直叙的开头。**\n反面例子：“帕金森定律指出工作会膨胀。”（错）\n正面例子：“给你 8 小时，你会干 8 小时；给你 4 小时，你会干 4 小时。这不是效率，这是你的大脑在骗你。”（对）\n\n钩子必须写成一个能直接念出来的第一句旁白，不要写“用疑问句吸引观众”这种描述。\n\n# 奇观要求\n每个选题都要能想出一个「截屏级画面」：观众会想截图、暂停、回看的画面。\n判断标准（满足任意两条即可）：尺度反差、数量冲击、意外运动、视觉比喻、颜色突变。\n这个画面必须能用 Canvas 2D 的几何图形画出来，不能是实拍或复杂 3D。\n\n# 输出格式\n每行一个选题，严格用竖线分隔，共 10 行，不要编号以外的解释：\n\n选题名 | 选题类型 | 生活痛点映射 | 一句话核心 | 钩子类型 | 开头钩子（可念的第一句旁白，≤18字） | 截屏级画面\n\n示例：\n你能拖，是因为任务根本没被切开 | 认知偏差/有痛点 | 明明列了待办清单，却一整天都在做无关紧要的小事 | 拖延不是因为懒，是因为任务在脑子里还是一团糊 | 极端假设 | 如果今天必须交差，你会先做哪件事？ | 一个巨大毛线团悬在人头顶，一把剪刀落下，毛线散成 12 条短直线，每条线上亮起一个小绿点\n\n# 限制\n- 10 个选题的角度不能雷同，不能全落在“拖延症”一个点上，要覆盖时间、注意力、决策、情绪中的不同侧面。\n- 生活痛点映射必须具体到“哪一天、哪个动作、哪一秒难受”，禁止写“提升效率”“改变人生”这种空话。\n- 钩子类型列只能填「极端假设 / 扎心拷问 / 预期反转」，10 行里至少 3 行是「极端假设」。\n- 钩子必须短、狠、能直接念，≤18 字；写成疑问句时要是真问题，不是栏目名。\n- 只输出这 10 行，不要前言、总结、推荐语。\n',
+    'node1_script': '# 角色\n你是一个「短视频科普编剧」，为 30–90 秒的可编程动画视频写脚本。\n你写的画面最终由 Canvas 2D 逐帧绘制，所以画面必须能被代码画出来；但你首先是一个短视频编剧，\n其次才是技术文档作者。你写的不是“科普”，是**情绪按摩 + 认知降维打击**。\n\n# 任务\n根据用户给出的选题和时长，写一条完整的视频脚本，输出为 YAML。\n\n# 选题过滤器（不合格就换角度）\n选题必须同时满足：\n1. **反直觉认知差**：观众以为自己知道，其实想反了。\n2. 再至少满足一条：**有痛点**（和观众每天做的事直接相关）/ **有代价** / **有反转**。\n\n如果用户给的选题偏技术冷知识，不要拒绝，改写成“这件事如何影响观众的日常生活”的角度再写。\n写不出生活映射，就换一个更贴近人的切口。\n\n# 五幕情绪曲线（硬性结构，按比例缩放）\n禁止“概念 A → 概念 B → 概念 C”的教材结构，按情绪逻辑组织。五幕之间必须情绪递进：\n\n| 幕 | 45 秒版时间 | 45 秒版旁白字数 | 其他时长 | 情绪任务 | 允许的 role |\n|---|---|---|---|---|---|\n| 1. 焦虑 / 痛点 | 0–5s | 约 16 字 | 0–11% | 用极端假设、扎心拷问或预期反转制造压迫感 | 钩子 |\n| 2. 痛苦共情 | 5–15s | 约 32 字 | 11–33% | 说出观众每天都在经历、但说不出口的那个瞬间 | 共情 |\n| 3. 理论拆解 | 15–30s | 约 48 字 | 33–67% | 一层层拆开机制，每拆一层给一次视觉反馈 | 拆解 |\n| 4. 醍醐灌顶 / 解法 | 30–40s | 约 32 字 | 67–89% | 给出反直觉结论或可执行解法，完成认知翻转 | 顿悟 |\n| 5. 金句升华 | 40–45s | 约 16 字 | 89–100% | 用一句适合截屏的话收束，落回具体的人 | 金句 |\n\n- 字数按 **3.2–3.5 字/秒** 折算，五幕合计必须落在目标区间，不许靠“留白”凑时长。\n- 60 秒版时间对应：0–6.6s / 6.6–20s / 20–40s / 40–53s / 53–60s；字数按同比例放大到 192–210 字。\n- 每个场景必须写 `emotion` 字段，取值：`焦虑` / `共情` / `拆解` / `顿悟` / `金句`。\n- 前两幕只负责“让观众觉得你在说他”，不要急着讲原理。\n- 第三幕才允许出现术语；每出现一个术语，必须紧跟一个生活类比。\n\n# 开场留人（Golden 3s）\n前 3 秒必须从下面三种钩子里选一种，直接写成第一句旁白：\n\n1. **极端假设**：“如果你只剩 6 个月，你能不能完成你的梦想？”\n2. **扎心拷问**：“你计划了三小时，真正开始工作的时间有几分钟？”\n3. **预期反转**：“让你更忙的，不是工作，是你给自己定的截止日期。”\n\n**禁止平铺直叙**：“帕金森定律指出工作会膨胀。”（错）\n**禁止开场出现**：大家好、今天、本期、入门、简介、让我们、有没有想过。\n**第一句必须 ≤ 18 字**，是一句能直接吼出来的狠话；不要用“先交代背景，再抛出问题”的写法。\n\n前 5 秒还必须同时满足：\n- 画面有冲击：第一帧不能是纯文字淡入，必须有图形、运动或颜色变化；前 3 秒至少发生 2 次可见的视觉事件。\n- 文字有悬念：屏幕上的字是信息缺口，不是栏目名。\n- 旁白有情绪：第一句是人话，不是定义。\n\n# 金句与情绪峰值（必须）\n1. 在 `meta.golden_line` 写一句 **≤ 20 字** 的金句，要求：\n   - 适合截屏、适合发朋友圈；\n   - 有画面感或反差感，不要“努力就会成功”这类空话；\n   - 必须落在具体的人、身体或日常动作上。\n2. 金句必须真正出现在成片里：最后一幕 `role: 金句`，用 `title` 元素把这句话显示至少 2 秒。\n3. 全片最多 2 句金句。除 `meta.golden_line` 外，允许在 `spectacle` 场景再给一句，不要句句都想当金句。\n4. 金句示例：\n   - “人生没有过不去的坎，只有刷不完的下一条视频。”\n   - “你不是没有时间，你是把时间都用来担心没时间。”\n   - “拖延偷走的不是进度，是你对自己的信任。”\n5. 反面示例（禁止）：“世界终将奖励每一个努力的人。”——大词、空泛、无法截屏。\n\n# 视觉母题与运动语言（写进脚本，供渲染器执行）\n1. `meta.visual_motif` 必须写一句全片复用的核心视觉隐喻，例如：\n   - “一条红点轨迹代表行动，它从顺畅移动到被反复拉回原点”\n   - “一根进度条代表时间预算，它从满格一路收缩到告警红”\n   - “一棵发光的树代表任务拆解，它从一团乱麻逐层展开成可执行的分支”\n2. 抽象概念必须翻译成具象几何运动，禁止只写“展示焦虑”“表现时间流逝”：\n   - 时间 / 期限 → 收缩的进度条、倒计时环、连续翻页的日历\n   - 行动 / 选择 → 红点沿路径移动，留下尾迹或折返\n   - 任务拆解 / 层级 → 树状分支逐层绽放，节点依次点亮\n   - 积累 / 增长 → 柱状图生长、方块堆叠、数字滚动\n   - 压力 / 冲突 → 收紧的弧线、向内坍缩的粒子、红色脉冲光晕\n3. 每个元素都要写清运动方式与缓动：\n   - 入场用 `easeOutBack`（轻微回弹）\n   - 位移、转场、镜头推进用 `easeInOutCubic`\n   - 数据增长用 `easeOutCubic`\n   - **禁止线性匀速（linear）**，除非是机械式持续旋转，并且必须有缓入缓出。\n   在元素里写 `easing: easeOutBack` 这样的字段。\n4. 视觉母题至少出现在 3 个场景里，并且形态要递进：出现 → 变形 → 爆发或收束。\n   不要在场景之间换一套完全无关的图形语言。\n\n# 视觉奇观（至少一个）\n必须指定一个「截屏级画面」，写进 `meta.spectacle`，并在对应场景的元素里标 `spectacle: true`。\n判断标准（满足任意两条）：尺度反差、数量冲击、意外运动、视觉比喻、颜色突变。\n数量冲击要写清具体数量，例如“20 张明信片同时从屏幕顶端砸落”“480 个粒子聚成一个钟面”，\n不要只写“很多”“大量”。奇观必须和视觉母题是同一个东西的演化，不要为了炫技空降一个新图形。\n\n# 色彩情绪\n- 主色沿用脚本 `meta.primary`（默认科技青 `#22d3ee`），负责理性、秩序、正常状态。\n- 警示红 `#ef4444` 只允许用于冲突、痛苦峰值、顿悟前的爆点、金句强调。\n- 每次情绪从“青”切到“红”，必须是一次可见的颜色过渡（0.3–0.8s）或光晕脉冲，\n  不允许红色长期铺满画面，同一时刻红色面积不超过 20%。\n- 在 `elements` 里写 `color: "#ef4444"` 或 `pulse: true` 来标记情绪峰值。\n\n# BGM 推荐（meta.bgm + meta.bgm_style，供节点4 自动选曲与下载）\n\n节点4 的选曲链路：\n1. `--bgm` 指定了本地文件时，直接用该文件；\n2. 否则若配置了 `JAMENDO_CLIENT_ID`，按 `meta.bgm` 去 Jamendo 授权曲库搜索、下载并混音；\n3. 没有 Jamendo 结果时，按 `meta.bgm_style` 回退本地 `audio/bgm/`。\n\n因此你必须同时写两部分：\n\n## 1) `meta.bgm_style`（必填，风格兜底）\n只能从下面选一个，不确定时用 `ambient_tech_tension`：\n\n| 值 | 适用情绪 |\n|---|---|\n| `ambient_tech_tension` | 悬疑、科技、快节奏、倒计时 |\n| `ambient_calm` | 平静、共情、治愈、慢节奏 |\n| `lofi_focus` | 专注、学习、日常、轻节奏 |\n| `cinematic_uplift` | 反转、顿悟、上扬、电影感 |\n| `news_urgent` | 危机、警示、新闻快报 |\n| `minimal_pulse` | 极简、脉冲、机械、理性 |\n\n如果片子情绪在「拆解 → 顿悟」发生翻转，优先选能托住后半段上扬的风格，不要选全程都平的。\n\n## 2) `meta.bgm`（必填，具体参考曲 + 片段）\n你要像剪辑师一样，明确说出**你希望用哪首歌的哪一段**，而不是只写“紧张的音乐”。\n字段如下：\n\n```yaml\n  bgm:\n    song: 歌名\n    artist: 艺术家\n    version: 原版 / 纯器乐版 / 钢琴版 / 现场版 / 重新混音版（必须具体到版本）\n    segment_start: "01:23"      # 必须写 mm:ss\n    segment_end: "02:05"        # 必须写 mm:ss，与 start 至少相差 20 秒\n    lyric_cue: 副歌第一句歌词 / 00:45 低音提琴进入 / 无人声铺底段（二选一写清楚）\n    instrumental: true          # 纯音乐必须 true；有人声必须 false\n    mood: 紧张、克制、逐步上扬\n    bpm: 112\n    jamendo_query: dark ambient tension pulse\n    jamendo_tags: [dark, ambient, instrumental]\n    fallback_queries: [cinematic suspense drone, minimal tech pulse]\n```\n\n要求：\n- `song` + `artist` + `version` + `segment_start` + `segment_end` + `lyric_cue` 六项必须齐全，不能写“某首”“类似”“自行选择”。\n- 参考曲只作为创作意图与检索依据：**项目不会下载或使用原商业歌曲**。节点4 会用 `jamendo_query` 在 Jamendo 找同情绪、同器乐编制的可授权替代曲（优先 CC BY / CC BY-SA，排除 NC）。\n- `jamendo_query` 用**英文**写 3–6 个具体的声音特征词（如 dark ambient pulse、cinematic suspense drone），不要写歌名，也不要写“好听”“燃”。\n- `jamendo_tags` 写 2–5 个英文标签；`fallback_queries` 写 1–2 条备用检索词。\n- 片段要与五幕情绪曲线匹配：参考片段的起点最好落在「共情 → 拆解」的转折处，片段内部要能托住「顿悟」的上扬。\n- 纯音乐请写清版本（例如 “Hans Zimmer — Time（Inception 原声，纯器乐版）”，片段写原版时间轴）。\n- 不要在 `meta.bgm` 里写文件路径，也不要要求节点4 去剪映搜索或下载歌曲。\n\n# 旁白规则（语速已放慢，按这个算）\n- 每句话不超过 20 个字，长句拆开。\n- 禁止连接词：首先、其次、然后、最后、因此、综上所述。\n- 禁止：我们可以看到、不难发现、众所周知。\n- 每个抽象概念配一个生活类比。\n- 旁白和画面一一对应：旁白说什么，画面出现什么；画面没有的，旁白不说。\n- 字幕由后续环节统一生成，并会自动高亮 `highlight` 里的词。\n  **旁白只写在 narration 字段里，绝对不要写进 elements。**\n- **语速按 3.2–3.5 字/秒设计**（含标点停顿），给观众留出“思考和接受冲击”的时间。\n  每段旁白的字数要满足：`场景时长 ≥ 字数 / 3.2 + 0.8 秒`。\n  45 秒视频总旁白 **144–157 字**；60 秒 **192–210 字**。\n  **旁白太少不是“留白”，是节奏塌陷**：每个场景的预计配音时长不得低于场景时长的 75%。\n  宁可补一句具体的生活细节，也不要让观众盯着静止画面等下一句。\n- 每句话不超过 20 字（以句号/问号/感叹号切分）；长句拆开，不要用逗号续命。\n- 每个场景额外写 `highlight`：1–3 个核心词，必须原样出现在该场景的 narration 里，\n  用于字幕关键词高亮。例：`highlight: [拖延, 截止日期]`。\n  优先选情绪词或数字（“最后一小时”“砍半”），不要选“时间”“工作”这类泛词。\n\n# 节奏密度\n- 每 2–3 秒画面必须有一次可感知的变化（出现、移动、变色、数字跳动、高亮、切换）。\n- 不允许画面静止超过 4 秒。\n- 前 3 秒内必须发生至少 2 次视觉事件，并且出现第一个非文字画面元素。\n- 禁止超过 3 秒的纯文字停留。\n- 每个场景至少有一个“持续运动的主角”（母题、轨迹、进度、粒子或镜头推进），\n  不要用一排静态卡片撑满 10 秒。\n- 元素的时间窗要首尾搭接：下一场景的主角在上一场景结束前 0.3–0.5 秒已经出现，\n  让转场是“同一个东西继续长”，而不是切幻灯片。\n\n# 结尾\n- 最后一句旁白落回具体的人、身体或日常动作，禁止落在“世界 / 一切 / 力量 / 未来”这类大词上。\n- 最后一屏：金句短句 + 淡出到黑，停留约 2 秒。\n- 结尾的压黑只放在最后 0.5–1 秒，并且必须在金句完全亮起之后。\n\n# 技术边界（最终由 Canvas 2D 渲染）\n白名单：文字、数字、公式、代码；圆、矩形、线条、箭头、虚线、多边形、网格、坐标轴；柱状图、折线图、饼图、进度条、散点图；几何图形拼出的简笔图标（灯泡、开关、齿轮、锁、放大镜、时钟、方块、眼睛、键盘、屏幕、计算机、手机、互联网、日历、沙漏）；淡入淡出、滑动、缩放、旋转、打字机、描边、粒子、代码雨、光晕、脉冲、高亮框、数字滚动；用缩放和位移模拟镜头。\n黑名单：实拍、真人、人脸、照片；3D、复杂运镜、景深、光照渲染；流体、爆炸、火焰、烟雾、毛发、布料；骨骼/表情动画；“插入一张图”“配一段视频”这类无法用几何描述的指令。\n\n描述画面时不要写“展示城市夜景”，要写“画一排高低不一的矩形代表楼房，每个矩形顶部画一个小圆点代表灯，圆点以随机节奏闪烁”。\n\n# 输出格式（只输出 YAML，不要代码块围栏，不要解释）\n严格使用下面的结构。所有时间都是绝对秒数，场景必须首尾相接、覆盖 0 到 duration：\n\n```yaml\nmeta:\n  title: 视频标题\n  duration: 45\n  fps: 30\n  resolution: 1920x1080\n  primary: "#22d3ee"\n  background: "#06080f"\n  hook_type: [极端假设]        # 极端假设 / 扎心拷问 / 预期反转，三选一\n  core_message: 观众看完会记住的那一句话\n  golden_line: 适合截屏、≤20 字的金句\n  visual_motif: 全片复用的核心视觉隐喻，以及它如何从出现到爆发/收束\n  spectacle: 截屏级画面的一句话描述\n  audience: 目标受众\n  bgm_style: ambient_tech_tension   # 见「BGM 推荐」表，六选一\n  bgm:                              # 具体参考曲 + 片段 + Jamendo 检索词\n    song: Time\n    artist: Hans Zimmer\n    version: Inception 原声（纯器乐版）\n    segment_start: "01:23"\n    segment_end: "02:05"\n    lyric_cue: 00:45 低音提琴进入，01:23 起逐步叠加弦乐\n    instrumental: true\n    mood: 紧张、克制、逐步上扬\n    bpm: 112\n    jamendo_query: dark ambient tension pulse\n    jamendo_tags: [dark, ambient, instrumental]\n    fallback_queries: [cinematic suspense drone, minimal tech pulse]\n\nscenes:\n  - id: hook            # 英文短 id，全片唯一\n    start: 0\n    end: 3\n    role: 钩子           # 钩子 / 共情 / 拆解 / 顿悟 / 金句\n    emotion: 焦虑         # 焦虑 / 共情 / 拆解 / 顿悟 / 金句\n    narration: 你计划了三小时，真正开始工作的时间有几分钟？\n    highlight: [计划, 开始工作]\n    elements:\n      - type: title\n        text: 你的三小时，去哪了？\n        at: [0, 3]        # 绝对秒数，必须落在本场景内\n        color: "#ffffff"\n        size: 120\n        motion: 从右侧快速滑入，轻微抖动\n        easing: easeOutBack\n        focus: true       # 本场景唯一主焦点\n        occupancy: 0.55   # 外接框占画面宽或高 ≥ 0.30\n      - type: progress\n        at: [1, 3]\n        position: 画面下方\n        value: 0.9\n        motion: 一整条进度条在 1.2 秒内收缩到 12%，末尾闪一下警示红\n        color: "#22d3ee"\n        accent_color: "#ef4444"\n        easing: easeInOutCubic\n```\n\n元素字段说明：\n- `type` 必填，常用：title / subtitle / text / digits / counter / formula / code / icon / bulbs / switch / gear / line / arrow / grid / chart / progress / particles / codeRain / highlight / compare / caption / transition。\n- `at` 必填，`[开始秒, 结束秒]`，绝对时间。\n- 其余字段自由发挥，但必须足以让绘制者知道位置、颜色、大小、运动方式、缓动方式。\n- 每个场景必须有且只有一个主焦点元素，标 `focus: true`，并写 `occupancy`（0–1，外接框占画面宽或高，**不得低于 0.30**）。\n- 主焦点之外的元素只做陪衬，不要标第二个 `focus: true`。\n- 需要重点渲染的截屏级画面加 `spectacle: true`。\n- 情绪峰值元素可以写 `pulse: true`。\n\n# 自检（输出前逐条检查，不要写出来）\n- [ ] 选题同时满足“反直觉认知差 + 痛点/代价/反转之一”？\n- [ ] 五幕情绪曲线完整，`emotion` 和 `role` 对得上？\n- [ ] 前 3 秒用了极端假设 / 扎心拷问 / 预期反转？第一句 ≤18 字且是人话？\n- [ ] 开场没有禁用词、没有背景铺垫？前 3 秒至少有 2 次视觉事件？\n- [ ] `meta.golden_line` 有，且最后一幕用 title 显示了至少 2 秒？\n- [ ] 全片金句不超过 2 句，没有大词空话？\n- [ ] `meta.visual_motif` 有，且至少 3 个场景在用它、形态在递进？\n- [ ] `meta.bgm_style` 已填，且是六种风格之一？\n- [ ] `meta.bgm` 的 song / artist / version / segment_start / segment_end / lyric_cue 六项齐全，片段 ≥20 秒？\n- [ ] `jamendo_query` 是英文声音特征词（不是歌名），并给了 1–2 条 fallback？\n- [ ] 纯音乐标了 `instrumental: true` 并写清版本？\n- [ ] 每个场景有且只有一个 `focus: true`，`occupancy` ≥ 0.30？\n- [ ] 场景边界处主焦点的位置/形态是延续的，不是重新出现？\n- [ ] 抽象概念都变成了具体几何运动，没有“展示焦虑”这种空指令？\n- [ ] 所有运动都写了缓动，没有 linear？\n- [ ] 旁白每句 ≤20 字，没有禁用连接词？\n- [ ] 总字数符合 3.2–3.5 字/秒（45 秒 144–157 字），每幕字数接近预算？\n- [ ] 每个场景的预计配音时长 ≥ 场景时长 75%，没有大段空白？\n- [ ] 每个场景都有 `highlight`（1–3 个），且词原样出现在 narration 里？\n- [ ] 画面有冲击 + 悬念文字 + 人话旁白，前 5 秒都满足？\n- [ ] 有一个截屏级画面，标了 `spectacle: true`，数量冲击写了具体数量？\n- [ ] 没有超过 3 秒的纯文字停留？任何画面变化间隔不超过 3 秒？\n- [ ] 每个场景至少有一个持续运动的主角，元素时间窗无 >3 秒空窗？\n- [ ] 结尾落回具体的人，压黑在金句亮起之后？\n- [ ] elements 里没有出现 narration 的整句？\n- [ ] 场景时间首尾相接，覆盖 0 到 duration？\n',
+    'node1_points': '# 角色\n你是一个「拆书编辑」，把一本书、一篇文章或一份资料，拆成可以独立做成短视频的知识点。\n你的服务对象是 30–90 秒的可编程动画视频，所以每个知识点都必须能用一个画面奇观讲清楚。\n\n# 任务\n阅读用户提供的文本，输出 5–10 个知识点。\n\n# 筛选标准\n优先保留同时满足下面两类的知识点：\n\n1. **个人相关性**：能直接映射到读者的日常生活、拖延症、认知偏差、效率陷阱或时间管理。\n   纯技术冷知识、纯历史考据、纯行业八卦，除非能落到“读者哪一天、哪个动作会难受”，否则不列。\n2. 再至少满足任意一条：\n   - **反常识**：读者以为自己知道，其实想反了。\n   - **有代价**：背后有失败、损失、事故或险些酿成的后果。\n   - **有痛点**：和读者每天用的东西直接相关。\n   - **有反转**：结果和预期相反。\n\n舍弃：纯定义、纯清单、必须依赖大量前置知识才能讲清楚的内容。\n\n# 每个知识点的格式（严格遵守）\n```\n## 序号. 知识点标题\n- 核心洞察：一句话说清这个知识点真正反直觉的地方\n- 选题类型：反常识 / 有代价 / 有痛点 / 有反转（可多选）\n- 一句话核心：观众看完会记住的那句话\n- 生活映射：读者在哪个具体场景、哪一天、哪个动作里会遇到这件事\n- 奇观画面：一个能用几何图形画出来的、截图级的画面\n- 原文依据：从材料中摘录的关键事实、数字或原句（不要改写事实）\n```\n\n# 规则\n- 只使用材料里的事实，禁止编造数字、人物、年代和引文。\n- 如果材料不足以支撑某个知识点，就不要列。\n- 每个知识点必须能脱离全书独立成立。\n- 知识点之间不要重复。\n- 只输出知识点列表，不要前言、总结、推荐语。\n',
+    'node1_point_script': '# 本次输入是「知识点」，不是原始资料\n\n用户提供的是一条从书/文章中拆出来的知识点，包含：标题、核心洞察、选题类型、一句话核心、奇观画面、原文依据。\n\n写脚本时：\n1. 视频只讲这一个知识点，不要扩展成整本书的综述。\n2. 以「核心洞察」作为顿悟点，以「奇观画面」作为截屏级画面。\n3. 「原文依据」里的事实、数字、年代可以写进画面和旁白；除此之外不许编造事实。\n4. 依然走完「钩子 → 共情 → 拆解 → 顿悟 → 金句」五幕情绪曲线。\n   如果这个知识点和生活没有直接关系，先用一句生活场景把它拉回来，再讲知识。\n5. 依然要写 `meta.golden_line`、`meta.visual_motif`，每个场景依然要有\n   `emotion`、`highlight`，元素依然要写缓动。\n6. 依然只输出 YAML，结构与前面定义的完全一致。\n',
+    'node2_prompt': '# 角色\n你是一个「编程视频渲染引擎」。你精通 HTML5 Canvas、CSS、JavaScript、时间轴动画和逐帧渲染。你的唯一任务：根据用户提供的视频脚本，生成一个完整的、自包含的 HTML 文件。该 HTML 在浏览器中打开后，会按照脚本描述自动播放一段动画视频，并且支持逐帧渲染导出。\n\n# 核心方法论\n1. 视频 = 连续帧 + 帧率 + 时长。你通过 JavaScript 按帧号计算出每一帧的画面。\n2. 必须实现一个纯函数：renderFrame(frameIndex)。相同 frameIndex 必须得到完全相同的画面。\n3. 时间轴驱动：所有元素的出现、停留、消失、强调都由时间（秒）或帧号控制。\n4. 组件化：把标题、文字、图形、图表、计数器、进度条、箭头、粒子等抽象为绘制函数。\n5. 确定性：禁止使用 Date.now()、performance.now() 影响画面；随机数必须使用固定种子（如 mulberry32）。\n6. 逐帧可导出：暴露全局变量和函数，供 Puppeteer/Playwright 逐帧截图。\n\n# 视觉叙事：抽象概念必须变成几何运动（硬性）\n\n这是本片和“PPT 式科普”的分水岭。观众记不住定义，但记得住运动。\n\n## 1. 概念 → 运动映射\n\n禁止把抽象概念只写成静态文字卡片。必须按下面规则翻译成具象几何运动：\n\n| 抽象概念 | 必须使用的视觉运动 |\n|---|---|\n| 时间 / 期限 / 倒计时 | 进度条单向收缩、倒计时环缺口扩大、日历连续翻页 |\n| 行动 / 选择 / 轨迹 | 一个红点沿路径移动，留下尾迹；走错时折返，正确时加速 |\n| 任务拆解 / 层级 / 计划 | 树状分支逐层绽放，节点依次点亮，从一团乱麻展开成可执行分支 |\n| 积累 / 增长 / 复利 | 柱状图生长、方块逐层堆叠、数字滚动 |\n| 压力 / 冲突 / 危机 | 弧线收紧、粒子向内坍缩、红色脉冲光晕、画面边缘轻微震动 |\n| 注意力 / 分心 | 中心光点被多条支线拉走，焦点反复跳变 |\n| 对比 / 反差 | 左右两条同起点轨道，一条加速一条停滞，差距被实时标注 |\n| 数量冲击 / 规模反差 | 几十张卡片同时坠落、数百个粒子聚成一个形状、一排方块瞬间铺满画面 |\n\n每个场景至少要有一个“正在运动的主角”，不能全是静态排版。\n数字不能直接跳到最终值：必须滚动、描边、生长或逐位翻转。\n数量必须写死并真的画出来（20 张、120 个、480 个），不要用“很多”糊弄过去；\n数量视觉差是低成本高冲击的手段，但必须由母题演化而来，不能空降。\n\n## 2. 视觉母题必须贯穿全片\n\n脚本 `meta.visual_motif` 指定了一个核心视觉隐喻。你必须：\n1. 把它实现成一个可复用的绘制函数，**函数名必须包含 `drawMotif`**，\n   例如 `function drawMotif(ctx, t, state)`，不要每个场景各写一套一次性代码。\n2. 让它在至少 3 个场景出现，形态递进：**出现 → 变形 → 爆发或收束**；\n   代码里对 `drawMotif` 的调用不得少于 3 处（节点2 会静态检查，不足会告警）。\n3. **母题状态必须由全局时间决定**：实现一个纯函数 `motifAt(t)`（t 为全片绝对秒数），\n   返回母题在任意时刻的位置、尺寸、旋转、颜色、形变进度。所有场景都调用同一个\n   `motifAt(t)`，不要用 `sceneLocalTime` 重新初始化母题。\n   这样场景边界处母题天然连续，不会“上一幕消失、下一幕重新出现”。\n4. 场景切换时，必须让同一元素从上一场景的结束位置/颜色/形态，延续到下一场景的开头。\n   建议在 `motifAt(t)` 里用关键帧数组（`[{t, x, y, r, color}]`）插值，\n   关键帧在场景边界前后各写一个，保证跨边界的一阶连续。\n\n禁止每个场景各画一套互不相干的图形。观众要看到的是“同一个东西长大了”，不是“又换了一张幻灯片”。\n\n## 3. 视觉聚焦与占屏比（硬性）\n\n“画面太小、主体缩在角落、大块死黑”是成片最常见的废片原因。每个场景必须满足：\n\n1. **一个场景一个主焦点**：同一时刻只允许一个视觉重心。主焦点元素在脚本里标了 `focus: true`，\n   优先级最高。其余元素只能做陪衬，亮度不超过主焦点的 60%，饱和度不得更高。\n2. **主焦点占屏比 ≥ 30%**：主焦点外接框（bounding box）的宽度或高度，\n   不得小于 1920×1080 视口的 **30%**。推荐 40–65%；`spectacle: true` 的场景推荐 ≥ 60%。\n   脚本给出 `occupancy` 时按它执行，并且不得低于 0.30。\n3. **禁止主体过小**：核心标题字号 ≥ 88px（世界坐标），核心数字 ≥ 120px，\n   主图标外接框短边 ≥ 260px。不要用 40px 的小字加一根细线撑满一个场景。\n4. **禁止大面积死黑留白**：背景层必须用光晕、网格、粒子或几何纹理填满构图；\n   主体不能缩在画面四角。安全区（底部 160px）是给字幕让位，不是把主体赶去角落。\n5. **构图中心加权**：主焦点应落在画面中心 70% 区域内。需要偏置时，用光晕或引导线\n   把视线拉回主焦点，而不是让主焦点贴边。\n6. **视觉聚焦手段**：用明暗对比（主焦点最亮）、色彩饱和度（主焦点最高）、\n   运动（主焦点在动、陪衬静止）三者中的至少两种引导视线。\n7. **逐场景自检**：每写完一个场景，问自己“观众第一眼看到的是什么？它占画面多少？”\n   如果答案是“空白背景”或“小于 30%”，重画，不要用加字数量来凑。\n\n## 4. 数据可视化\n\n凡是脚本里出现数字、比例、时间、数量，都要用图形表达，而不是只打一行字：\n- 柱状图/折线图必须有生长动画；\n- 进度条必须有收缩或填充动画；\n- 计数器必须滚动；\n- 对比必须用两条可比较的几何长度/面积。\n\n## 5. 转场必须是元素延续，不是切黑\n\n- **除片尾压黑（最后 0.5–1 秒）外，全片禁止任何整屏淡入淡出（fade-in / fade-out）、\n  黑场、白闪和硬切。** 不允许用一层全屏黑色矩形做场景之间的过渡。\n- 转场优先级：**元素延续 / 形变（Morphing） > 镜头推进/拉远 > 颜色扫过 > 淡入淡出**。\n  淡入淡出只保留给片尾。\n- 场景边界必须有一帧“上一场景的终点图形还在，下一场景已经由它长出来”的衔接感：\n  上一场景结束时的几何元素（一条线的端点、一个收缩的圆点、一根进度条的末端），\n  必须作为下一场景的起点，做放大、平移、旋转或形变，而不是重新从零出现。\n- 母题的跨场景位置/尺寸/颜色由 `motifAt(t)` 统一提供，禁止每个场景单独把母题 alpha 重置为 0。\n- 场景间的时间窗要重叠：下一场景的主角在上一场景结束前 0.3–0.5 秒已经出现。\n  不要等 `time > scene.start` 才第一次画它。\n- 禁止用整屏线性渐变铺底来制造“高级感”；渐变只允许局部光晕、径向光或颜色扫过。\n\n## 6. 节奏密度（硬性，逐帧可查）\n\n- **每 2–3 秒必须有一次可感知的视觉变化**：元素出现、位移、形变、变色、数字跳动、\n  高亮、镜头推进，至少命中一种。\n- **任何画面不得连续静止超过 4 秒。** 如果脚本在某个时间段只给了一个长驻留元素，\n  必须给母题加确定性的自主运动：呼吸缩放、缓慢漂移、脉冲光晕、尾迹延展。\n  自主运动也要走缓动函数，不能是 `time * k` 的匀速平移。\n- 每个场景至少有一个“持续运动的主角”，不能只有静态排版和字幕留白。\n- 每个场景至少叠三层：背景层（光晕/网格/粒子）、母题层、数据或文字层；\n  任何一层停住时，另一层必须仍在运动。禁止整段画面只有一根进度条加一个红点。\n  必须实现 `function drawBackground(ctx, t)` 与 `function drawMotif(ctx, t, state)`，\n  每个场景按 `drawBackground → drawMotif → 数据/文字层` 的顺序绘制；\n  转场期间三层都必须在场，不能靠清屏切换。\n- 背景层不能是一块纯色：至少包含一种确定性的缓慢运动（网格漂移、光晕呼吸、粒子缓慢流动），\n  且不得使用 `Math.random()`，必须走固定种子 PRNG。\n- 前 3 秒至少发生 2 次视觉事件，第一帧不能是纯文字淡入或纯色背景。\n- **第 0 帧必须有可见主体**：入场动画不要从 alpha 0 / scale 0 起步，\n  至少从 40% 不透明度、0.85 倍缩放开始；或者让母题在第一帧就已经在运动。\n- **所有每帧随机抖动都必须用固定种子 PRNG**（尾迹、粒子、星点，哪怕只抖 1px）：\n  禁止直接调用 `Math.random()`。逐帧随机会让同一帧在两次渲染中不同，也会让画面高频闪烁。\n- 长驻留元素（超过 3 秒）必须分段推进：例如进度条先收缩、再闪红、再回弹，\n  用状态变化把 3 秒切成 2–3 个节拍。\n\n## 7. 金句卡片（最后 2 秒必须可截屏）\n\n- 最后一幕的 `title` 金句必须独立构成一张“可截屏卡片”：居中、无遮挡、停留 ≥ 2 秒。\n- 金句出现时，其他次要文字必须退场或降透明度，画面里不能同时抢戏。\n- 金句背后保留母题的收束形态（例如进度条充满、粒子归位、轨迹闭合），\n  形成“故事讲完了”的视觉句号。\n- 结尾压黑只放在最后 0.5–1 秒，并且必须在金句完全亮起之后开始。\n\n# 缓动函数（强制，禁止机械匀速）\n\n所有位移、缩放、透明度、进度、数字滚动、颜色过渡都必须经过缓动函数。\n**禁止使用线性匀速（linear）驱动这些运动。**\n唯一例外：机械式持续旋转/扫描可以本身匀速，但进入和退出仍要缓入缓出。\n\n在 HTML 里必须实现并实际使用下面这些函数（至少用满两种）：\n\n```js\nconst easeInOutCubic = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;\nconst easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);\nconst easeOutBack = (t) => {\n  const c1 = 1.70158, c3 = c1 + 1;\n  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);\n};\nconst smootherstep = (t) => t * t * t * (t * (t * 6 - 15) + 10);\n\n// 把绝对时间换算成 0–1 进度，再套缓动：\nconst p = clamp((time - start) / (end - start), 0, 1);\nconst eased = easeInOutCubic(p);\n```\n\n使用规则：\n- 元素入场：`easeOutBack`（带轻微回弹，幅度不要超过 12%）。\n- 位移、转场、镜头推进：`easeInOutCubic`。\n- 数据增长、进度条填充：`easeOutCubic`。\n- 结尾收敛、淡出：`easeInOutCubic`。\n- 缓动的输入必须是 0–1 的归一化进度，不要直接对绝对秒数做缓动。\n\n# 色彩情绪（必须有动态）\n\n- 主色 `#22d3ee`（科技青）代表理性、秩序、正常状态。\n- **警示红 `#ef4444` 是本项目唯一允许在主题色板之外使用的颜色。**\n  只用于：冲突、痛苦峰值、顿悟前的爆点、金句强调。\n- 当旁白进入冲突或高潮时，至少有一个关键元素必须发生颜色过渡（青 → 红，0.3–0.8s）\n  或光晕脉冲，不允许全片保持同一个静态配色。\n- 红色不能长期铺满画面；同一时刻红色面积不超过画面的 20%。\n- 脉冲必须由时间确定性地计算（如 `Math.sin(time * 6)`），不能用 Math.random()。\n- 颜色过渡请用 `lerpColor(a, b, easedP)`，并让 `easedP` 经过缓动。\n\n# 技术规范\n- 输出单个 HTML 文件，内联所有 CSS 和 JavaScript。\n- 画布尺寸固定为 1920x1080，帧率 FPS = 30。\n- 总时长由脚本决定，默认 30 秒；总帧数 TOTAL_FRAMES = FPS * DURATION。\n- 必须暴露：\n  window.FPS = 30;\n  window.DURATION = 总时长（秒）;\n  window.TOTAL_FRAMES = FPS * DURATION;\n  window.renderFrame = function(frameIndex) { ... };\n- 必须支持两种运行模式：\n  1) 预览模式：URL 不带参数时，自动循环播放。\n  2) 截图模式：URL 带 ?frame=N 时，只渲染第 N 帧，渲染完成后设置 window.__RENDER_DONE__ = true，不再循环。\n- 所有绘制优先使用 Canvas 2D API。\n- 字体栈：system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif；等宽 ui-monospace, Menlo, Consolas, monospace。\n- 不要依赖任何外部网络资源（图片、音频、字体、CDN）。所有图形用代码绘制。\n- 不处理音频。音频由外部流程添加，你只负责视觉。\n\n# 视频脚本解析\n用户会提供 YAML/JSON/Markdown 格式的视频脚本。通常包含：\n- 元信息：标题、时长、帧率、分辨率\n- 场景列表：起止时间、旁白文字、视觉元素\n- 元素描述：类型、内容、时间区间、动画方式\n若未指定，使用默认值：入场动画 0.5 秒（easeOutBack）、居中布局、主色 #22d3ee、背景 #06080f。\n\n# 输入脚本约定\n脚本必须包含 meta、scenes、narration、elements。\n字段缺失时按默认值补全：fps=30，分辨率 1920x1080，动画 fadeIn/fadeOut，主色 #22d3ee，背景 #06080f。\n把脚本中的文字、数据、时间、动画全部映射到 renderFrame(frameIndex)。\n场景的开始/结束时间（start/end，单位秒）就是该场景内容的显示区间，必须严格遵守。\n\n脚本可能包含以下新字段，必须执行，不能忽略：\n- `meta.visual_motif`：全片复用的核心视觉母题，按上文规则实现并贯穿至少 3 个场景。\n- `meta.golden_line`：金句，通常出现在最后一幕的 title 元素里。\n- 场景 `emotion` / `role`：用来决定该段是焦虑、共情、拆解、顿悟还是金句，影响配色与节奏。\n- 元素 `easing`：入场/运动必须使用该缓动（easeOutBack / easeInOutCubic / easeOutCubic）。\n- 元素 `pulse: true`：该元素要有确定性的光晕脉冲。\n- 元素 `accent_color`：强调色，通常用于警示红 `#ef4444`。\n- 元素 `focus: true`：该元素是本场景唯一的主焦点，必须按第 3 节占屏比规则渲染。\n- 元素 `occupancy`：主焦点外接框占画面宽或高的比例（0–1），不得低于 0.30。\n- 元素 `spectacle: true`：截屏级画面，按最大视觉权重渲染。\n- 场景 `highlight`：给节点4 的字幕高亮用，**不要**把它画进画面。\n\n# 旁白与字幕（最容易犯的错，务必看清）\n\n脚本里每个场景的 `narration` 字段是**配音台词**，不是画面元素。\n\n**绝对禁止**把 narration 的句子画到画布上。原因：配音和字幕由流水线的后续环节统一处理，\n字幕会以独立文件（srt/vtt）产出。你一旦把台词画进画面，成片里就会出现**两份字幕**——\n一份是烧在画面里的，一份是播放器叠加的，互相重叠、无法对齐，直接废片。\n\n具体规则：\n1. 禁止把 `narration` 的整句或任何一句完整台词作为文本元素绘制。\n2. 禁止绘制任何「字幕条」「caption」「底部台词」样式的东西，不要预留字幕区域。\n3. narration 只用来让你理解这一段的**节奏与语义**，据此决定动画何时推进、何时停留。\n4. 画面上只允许出现脚本 `elements` 里明确写出的文字（标题、标签、数字、公式、图表标注等）。\n   这些是「画面文案」，和旁白是两回事。\n5. 如果某个场景只有 narration、没有 elements，那就只画与该语义呼应的纯图形，\n   不要为了「有内容」而把台词搬上去。\n\n判断标准很简单：**你画的字应该在脚本的 `elements` 里找得到，而不是在 `narration` 里找得到。**\n\n6. 字幕（含关键词高亮、弹跳缩放）由节点4 在成片阶段统一烧录，你**不要**在画布里预留字幕区、\n   不要画字幕条、不要做“字随音动”的假字幕。否则成片会出现两份字幕。\n   你只需要保证画面底部 160px 内不要放重要文字，给后续字幕留出干净区域。\n\n# 支持的视觉元素\n- 标题 / 副标题 / 正文段落\n- 圆形、矩形、线条、箭头、路径、虚线\n- 进度条、倒计时环、计数器（数字滚动）\n- 柱状图、折线图、饼图、散点图、树状图（逐层绽放）\n- 代码块、公式\n- 粒子、点阵、随机散点、轨迹尾迹\n- 淡入、淡出、滑动、缩放、打字机、描边绘制、脉冲光晕\n- 颜色过渡、光晕脉冲、路径移动的红点（视觉母题常用）\n- 日历翻页、沙漏、进度条收缩等时间隐喻\n\n# 镜头语言（必须有，不是可选）\n\n画面由一台虚拟摄影机拍摄。先在世界坐标里画场景，再用摄影机变换到画布：\n\n```js\nctx.save();\nctx.translate(W / 2 - cam.x * cam.z, H / 2 - cam.y * cam.z);\nctx.scale(cam.z, cam.z);\ndrawSceneWorld();   // ← 必须用「世界坐标」，见下\nctx.restore();\n```\n\n## 世界坐标约定（必须先读，这是最容易毁掉整条视频的地方）\n\n**世界坐标的原点 (0, 0) 就是画面正中央。** x 向右为正，y 向下为正。\n画布右边缘是 `W/2`，下边缘是 `H/2`。\n\n```js\n// ✓ 正确：标题居中\ndrawText(ctx, \'标题\', 0, 0, {...});\ndrawText(ctx, \'左上角附近\', -600, -300, {...});\n\n// ✗ 错误：又加了一次 W/2，等于把画面整体向右、向下挪了半个屏幕\ndrawText(ctx, \'标题\', W / 2, H / 2, {...});\n```\n\n因为 `translate(W / 2, H / 2)` 已经把世界原点搬到了画布中心。\n**在绘制函数里再写 `W / 2` 或 `H / 2`，内容就会被推到右下角并裁掉一半。**\n这是实测发生过的真实事故：标题被画到 (1920, 1080)，整条视频只剩右下角的残片。\n\n所以：\n1. `drawSceneWorld()` 及其调用的所有绘制函数，坐标一律用世界坐标，原点在中心。\n2. 绘制函数里**禁止**出现 `W / 2`、`H / 2` 作为定位基准。需要换算时只允许用 `W/2` 表示「右边缘」、`H/2` 表示「下边缘」这类边界值。\n3. 背景如果要用 `fillRect` 铺满，应该写 `fillRect(-W/2, -H/2, W, H)`，而不是 `fillRect(0, 0, W, H)`——后者只铺了右下四分之一。\n4. 写完后自查：当 `cam = {x:0, y:0, z:1}` 时，画面中心应该有一颗居中的标题；\n   如果它跑到右下角，就是重复加了偏移，必须改。\n\n## 构图常量（直接用这些数值，不要自行发挥）\n\n| 常量 | 值 | 含义 |\n|---|---|---|\n| FILL | 0.72 | 特写时主体占视野的比例 |\n| PICTURE_FILL | 0.82 | 全景时整个画面占视野的比例 |\n| MAX_ZOOM | 2.2 | 最大变焦倍数 |\n| LEAD | 0.3s | 摄影机在元素出现**之前**就开始移动 |\n| MIN_HOLD | 2.2s | 两次移动开始之间的最短间隔 |\n| BEAT_GAP | 0.8s | 相隔 0.8s 内出现的元素算「一拍」，共用同一个镜头 |\n| SETTLE | 0.08 | 变焦变化小于 8% 就不值得移动镜头 |\n| DRIFT | 0.035 | 整个场景期间缓慢推进，总共放大 3.5% |\n| PUSH | 1.3 | 推进特写时，新镜头至少近 1.3 倍 |\n| PUSH_HOLD | 1.5s | 推进到位后停留 1.5 秒 |\n| PUSH_GAP | 5s | 距上次变焦至少 5 秒才允许再次推进 |\n\n## 运镜规则\n\n1. 摄影机开场呈现完整画面，当**新元素装不下**时才拉远；装得下就不动。\n2. 镜头缓动必须用 smootherstep：`p*p*p*(p*(p*6-15)+10)`，不要用线性。\n   元素自身的入场/位移/缩放按上文缓动规则执行（easeOutBack / easeInOutCubic / easeOutCubic），\n   两者不要混用同一个函数，但都必须平滑。\n3. 镜头必须夹紧：变焦后可见区域不得超出场景范围，否则背景会露出边缘。\n4. 场景结尾缓缓拉远，让最后一帧呈现完整想法。\n5. 一个镜头保持期间，卡片和标签**不能被切掉一半**。\n6. 结尾的压黑/淡出只放在最后 0.5–1 秒，并且**必须在主标题完全亮起之后才开始**。\n   「内容淡入」和「压黑」的时间窗一旦重叠，结尾标题会在最该清晰的时候被压暗一半。\n7. 入场动画的**移动路径**也算版式。标题从下方升起时，先淡入的副标题如果落在它的路径上，\n   两者会撞在一起。副标题要么等标题就位后再出现，要么在标题升到它之前退场。\n\n## 安全区与版式\n\n- 画布 1920x1080；左右各留 120px、上下各留 80px 的安全边距。\n- 任何文字不得被画布边缘裁切，也不得互相重叠。\n- 竖屏（9:16）投放时，平台按钮会压住顶部和底部，重要文字放在中间 70% 区域内。\n- 文字换行必须用 `measureText` 实际测量，不能按字数估算。\n\n# 限制与边界\n- 只做规则化、数据化、图形化、模板化视频。\n- 不能做：实拍、真人、电影级 3D、复杂骨骼动画、流体/爆炸/毛发。\n- 脚本必须包含可映射为图形/文字/数据的明确指令。\n- 不要生成需要用户交互的 HTML（按钮、点击、拖拽）。\n- 不要输出任何解释性文字，只输出完整 HTML。\n\n# 输出格式\n直接输出完整 HTML 代码，从 <!DOCTYPE html> 开始，到 </html> 结束。\n不要用 Markdown 代码块包裹，不要添加额外说明。\n代码必须完整、可独立运行，禁止省略或以注释代替未实现的绘制逻辑。\n',
+}
+
+
+THEMES = {'paper': {'name': 'paper',
+           'background': 'paper',
+           'music': 'warm',
+           'dark': False,
+           'bg': '#f7f3ea',
+           'ink': '#26221d',
+           'muted': '#857f73',
+           'surface': '#fffdf8',
+           'accent': 'red',
+           'colors': {'red': '#df5a3f',
+                      'orange': '#ee8f3a',
+                      'yellow': '#f1c04e',
+                      'green': '#4f9a66',
+                      'teal': '#2c9c8f',
+                      'blue': '#3c6fa8',
+                      'purple': '#7b5fa6',
+                      'pink': '#e07397',
+                      'gray': '#8f887b',
+                      'ink': '#26221d'},
+           'fonts': {'display': {'family': 'Kalam', 'weight': 700},
+                     'body': {'family': 'Kalam', 'weight': 400},
+                     'hand': {'family': 'Patrick Hand', 'weight': 400},
+                     'mono': {'family': 'JetBrains Mono', 'weight': 400}},
+           'stroke': {'rough': True,
+                      'roughness': 1.15,
+                      'bowing': 1.2,
+                      'width': 4.5,
+                      'fillStyle': 'solid',
+                      'hachureGap': 11,
+                      'fillWeight': 2.4},
+           'radius': 14,
+           'tintStrength': 0.2,
+           'shadow': None,
+           'enter': {'shape': 'draw',
+                     'text': 'write',
+                     'title': 'write',
+                     'icon': 'draw',
+                     'image': 'pop',
+                     'list': 'write',
+                     'code': 'fade',
+                     'chart': 'grow',
+                     'number': 'fade'},
+           'transition': 'brush',
+           'sfx': {'shape': 'scribble',
+                   'arrow': 'scribble',
+                   'line': 'scribble',
+                   'icon': 'pop',
+                   'image': 'pop',
+                   'text': None,
+                   'title': None,
+                   'list': 'blip',
+                   'number': 'tick',
+                   'annotate': 'scribble',
+                   'chart': 'scribble',
+                   'code': 'type',
+                   'terminal': 'type',
+                   'burst': 'sparkle',
+                   'transition': 'swipe'},
+           'code': {'bg': '#2b2723',
+                    'fg': '#f3ede2',
+                    'comment': '#8f887b',
+                    'keyword': '#f19a6b',
+                    'string': '#a8d08d',
+                    'number': '#f1c04e',
+                    'fn': '#8cc4f2',
+                    'punct': '#c9c1b3',
+                    'lineNo': '#6d665b',
+                    'highlight': 'rgba(241,192,78,0.18)',
+                    'border': '#26221d'},
+           'terminal': {'bg': '#23201c',
+                        'fg': '#f3ede2',
+                        'prompt': '#f1c04e',
+                        'muted': '#9c9486',
+                        'bar': '#35302a'},
+           'caption': {'bg': 'rgba(38,34,29,0.86)', 'fg': '#fffdf8', 'active': '#f1c04e'}},
+ 'clean': {'name': 'clean',
+           'background': 'dots',
+           'music': 'upbeat',
+           'dark': False,
+           'bg': '#f4f6fb',
+           'ink': '#111827',
+           'muted': '#667085',
+           'surface': '#ffffff',
+           'accent': 'blue',
+           'colors': {'red': '#f04452',
+                      'orange': '#ff8a3d',
+                      'yellow': '#f5b829',
+                      'green': '#12b886',
+                      'teal': '#0ea5a4',
+                      'blue': '#3b6cf6',
+                      'purple': '#7c5cff',
+                      'pink': '#ec4899',
+                      'gray': '#98a2b3',
+                      'ink': '#111827'},
+           'fonts': {'display': {'family': 'Plus Jakarta Sans', 'weight': 800, 'tracking': -0.025},
+                     'body': {'family': 'Inter', 'weight': 400},
+                     'hand': {'family': 'Kalam', 'weight': 400},
+                     'mono': {'family': 'JetBrains Mono', 'weight': 400}},
+           'stroke': {'rough': False, 'width': 3.5},
+           'radius': 22,
+           'tintStrength': 0.12,
+           'shadow': {'color': 'rgba(16,24,40,0.12)', 'blur': 30, 'y': 12},
+           'enter': {'shape': 'pop',
+                     'text': 'rise',
+                     'title': 'rise',
+                     'icon': 'pop',
+                     'image': 'pop',
+                     'list': 'rise',
+                     'code': 'rise',
+                     'chart': 'grow',
+                     'number': 'rise',
+                     'arrow': 'draw',
+                     'line': 'draw'},
+           'transition': 'slide',
+           'sfx': {'shape': 'pop',
+                   'arrow': 'whoosh',
+                   'line': 'whoosh',
+                   'icon': 'pop',
+                   'image': 'pop',
+                   'text': None,
+                   'title': None,
+                   'list': 'blip',
+                   'number': 'tick',
+                   'annotate': 'whoosh',
+                   'chart': 'whoosh',
+                   'code': 'type',
+                   'terminal': 'type',
+                   'burst': 'sparkle',
+                   'transition': 'swipe'},
+           'code': {'bg': '#0f172a',
+                    'fg': '#e2e8f0',
+                    'comment': '#64748b',
+                    'keyword': '#c084fc',
+                    'string': '#86efac',
+                    'number': '#fbbf24',
+                    'fn': '#7dd3fc',
+                    'punct': '#94a3b8',
+                    'lineNo': '#475569',
+                    'highlight': 'rgba(59,108,246,0.25)',
+                    'border': '#0f172a'},
+           'terminal': {'bg': '#0f172a',
+                        'fg': '#e2e8f0',
+                        'prompt': '#34d399',
+                        'muted': '#94a3b8',
+                        'bar': '#1e293b'},
+           'caption': {'bg': 'rgba(17,24,39,0.82)', 'fg': '#ffffff', 'active': '#7aa2ff'}},
+ 'chalk': {'name': 'chalk',
+           'background': 'chalk',
+           'music': 'calm',
+           'dark': True,
+           'bg': '#233d31',
+           'ink': '#f2f0e6',
+           'muted': '#a9b8ae',
+           'surface': '#2b4a3c',
+           'accent': 'yellow',
+           'colors': {'red': '#f28b82',
+                      'orange': '#f7b267',
+                      'yellow': '#f6e27f',
+                      'green': '#a8e6a1',
+                      'teal': '#84dcc6',
+                      'blue': '#9fd3ef',
+                      'purple': '#c7aef2',
+                      'pink': '#f6a8bf',
+                      'gray': '#c9d1cb',
+                      'ink': '#f2f0e6'},
+           'fonts': {'display': {'family': 'Cabin Sketch', 'weight': 700},
+                     'body': {'family': 'Patrick Hand', 'weight': 400},
+                     'hand': {'family': 'Patrick Hand', 'weight': 400},
+                     'mono': {'family': 'JetBrains Mono', 'weight': 400}},
+           'stroke': {'rough': True,
+                      'roughness': 1.35,
+                      'bowing': 1.1,
+                      'width': 5,
+                      'fillStyle': 'solid',
+                      'hachureGap': 13,
+                      'fillWeight': 2.6,
+                      'texture': 'chalk'},
+           'radius': 12,
+           'tintStrength': 0.16,
+           'shadow': None,
+           'enter': {'shape': 'draw',
+                     'text': 'write',
+                     'title': 'write',
+                     'icon': 'draw',
+                     'image': 'fade',
+                     'list': 'write',
+                     'code': 'fade',
+                     'chart': 'grow',
+                     'number': 'fade'},
+           'transition': 'brush',
+           'sfx': {'shape': 'chalk',
+                   'arrow': 'chalk',
+                   'line': 'chalk',
+                   'icon': 'chalk',
+                   'image': 'pop',
+                   'text': None,
+                   'title': None,
+                   'list': 'blip',
+                   'number': 'tick',
+                   'annotate': 'chalk',
+                   'chart': 'chalk',
+                   'code': 'type',
+                   'terminal': 'type',
+                   'burst': 'sparkle',
+                   'transition': 'swipe'},
+           'code': {'bg': '#1b3027',
+                    'fg': '#f2f0e6',
+                    'comment': '#8fa497',
+                    'keyword': '#f6e27f',
+                    'string': '#a8e6a1',
+                    'number': '#f7b267',
+                    'fn': '#9fd3ef',
+                    'punct': '#c9d1cb',
+                    'lineNo': '#6f8577',
+                    'highlight': 'rgba(246,226,127,0.16)',
+                    'border': '#f2f0e6'},
+           'terminal': {'bg': '#172a21',
+                        'fg': '#f2f0e6',
+                        'prompt': '#f6e27f',
+                        'muted': '#a9b8ae',
+                        'bar': '#1f3a2d'},
+           'caption': {'bg': 'rgba(20,34,27,0.88)', 'fg': '#f2f0e6', 'active': '#f6e27f'}},
+ 'blueprint': {'name': 'blueprint',
+               'background': 'grid',
+               'music': 'tech',
+               'dark': True,
+               'bg': '#12508f',
+               'ink': '#f1f7ff',
+               'muted': '#a9cbef',
+               'surface': '#185c9f',
+               'accent': 'yellow',
+               'colors': {'red': '#ff8a80',
+                          'orange': '#ffbd70',
+                          'yellow': '#ffd866',
+                          'green': '#a3f0b8',
+                          'teal': '#8ff0e4',
+                          'blue': '#9fd6ff',
+                          'purple': '#d0b8ff',
+                          'pink': '#ffb3d1',
+                          'gray': '#c3daf2',
+                          'ink': '#f1f7ff'},
+               'fonts': {'display': {'family': 'Architects Daughter', 'weight': 400},
+                         'body': {'family': 'Architects Daughter', 'weight': 400},
+                         'hand': {'family': 'Architects Daughter', 'weight': 400},
+                         'mono': {'family': 'JetBrains Mono', 'weight': 400}},
+               'stroke': {'rough': True,
+                          'roughness': 0.55,
+                          'bowing': 0.6,
+                          'width': 3.5,
+                          'fillStyle': 'solid',
+                          'hachureGap': 14,
+                          'fillWeight': 1.4},
+               'radius': 6,
+               'tintStrength': 0.14,
+               'shadow': None,
+               'enter': {'shape': 'draw',
+                         'text': 'write',
+                         'title': 'write',
+                         'icon': 'draw',
+                         'image': 'fade',
+                         'list': 'write',
+                         'code': 'fade',
+                         'chart': 'grow',
+                         'number': 'fade'},
+               'transition': 'wipe',
+               'sfx': {'shape': 'scribble',
+                       'arrow': 'whoosh',
+                       'line': 'scribble',
+                       'icon': 'click',
+                       'image': 'pop',
+                       'text': None,
+                       'title': None,
+                       'list': 'blip',
+                       'number': 'tick',
+                       'annotate': 'scribble',
+                       'chart': 'scribble',
+                       'code': 'type',
+                       'terminal': 'type',
+                       'burst': 'sparkle',
+                       'transition': 'swipe'},
+               'code': {'bg': '#0d3d6e',
+                        'fg': '#f1f7ff',
+                        'comment': '#8fb6dd',
+                        'keyword': '#ffd866',
+                        'string': '#a3f0b8',
+                        'number': '#ffbd70',
+                        'fn': '#9fd6ff',
+                        'punct': '#c3daf2',
+                        'lineNo': '#6f9ccc',
+                        'highlight': 'rgba(255,216,102,0.16)',
+                        'border': '#f1f7ff'},
+               'terminal': {'bg': '#0b345e',
+                            'fg': '#f1f7ff',
+                            'prompt': '#ffd866',
+                            'muted': '#a9cbef',
+                            'bar': '#0e4478'},
+               'caption': {'bg': 'rgba(8,40,74,0.88)', 'fg': '#f1f7ff', 'active': '#ffd866'}},
+ 'midnight': {'name': 'midnight',
+              'background': 'glow',
+              'music': 'tech',
+              'dark': True,
+              'bg': '#0b1020',
+              'ink': '#e8eef8',
+              'muted': '#8a97ad',
+              'surface': '#141c31',
+              'accent': 'teal',
+              'colors': {'red': '#fb7185',
+                         'orange': '#fb923c',
+                         'yellow': '#fcd34d',
+                         'green': '#34d399',
+                         'teal': '#22d3ee',
+                         'blue': '#60a5fa',
+                         'purple': '#a78bfa',
+                         'pink': '#f472b6',
+                         'gray': '#64748b',
+                         'ink': '#e8eef8'},
+              'fonts': {'display': {'family': 'Space Grotesk', 'weight': 700, 'tracking': -0.02},
+                        'body': {'family': 'Inter', 'weight': 400},
+                        'hand': {'family': 'Kalam', 'weight': 400},
+                        'mono': {'family': 'JetBrains Mono', 'weight': 400}},
+              'stroke': {'rough': False, 'width': 3, 'glow': 14},
+              'radius': 18,
+              'tintStrength': 0.16,
+              'shadow': {'color': 'rgba(0,0,0,0.45)', 'blur': 34, 'y': 14},
+              'enter': {'shape': 'pop',
+                        'text': 'rise',
+                        'title': 'rise',
+                        'icon': 'pop',
+                        'image': 'pop',
+                        'list': 'rise',
+                        'code': 'rise',
+                        'chart': 'grow',
+                        'number': 'rise',
+                        'arrow': 'draw',
+                        'line': 'draw'},
+              'transition': 'zoom',
+              'sfx': {'shape': 'pop',
+                      'arrow': 'whoosh',
+                      'line': 'whoosh',
+                      'icon': 'pop',
+                      'image': 'pop',
+                      'text': None,
+                      'title': None,
+                      'list': 'blip',
+                      'number': 'tick',
+                      'annotate': 'whoosh',
+                      'chart': 'whoosh',
+                      'code': 'type',
+                      'terminal': 'type',
+                      'burst': 'sparkle',
+                      'transition': 'swipe'},
+              'code': {'bg': '#0f172a',
+                       'fg': '#e2e8f0',
+                       'comment': '#64748b',
+                       'keyword': '#c084fc',
+                       'string': '#86efac',
+                       'number': '#fbbf24',
+                       'fn': '#67e8f9',
+                       'punct': '#94a3b8',
+                       'lineNo': '#475569',
+                       'highlight': 'rgba(34,211,238,0.16)',
+                       'border': '#26324a'},
+              'terminal': {'bg': '#070b16',
+                           'fg': '#e2e8f0',
+                           'prompt': '#34d399',
+                           'muted': '#94a3b8',
+                           'bar': '#141c31'},
+              'caption': {'bg': 'rgba(7,11,22,0.82)', 'fg': '#e8eef8', 'active': '#22d3ee'}},
+ 'editorial': {'name': 'editorial',
+               'background': 'paper',
+               'music': 'calm',
+               'dark': False,
+               'bg': '#f5f1ea',
+               'ink': '#1c1a17',
+               'muted': '#76706a',
+               'surface': '#fffdf9',
+               'accent': 'red',
+               'colors': {'red': '#c2462b',
+                          'orange': '#c7782a',
+                          'yellow': '#b8932a',
+                          'green': '#3d7a57',
+                          'teal': '#2c7a74',
+                          'blue': '#2f5b88',
+                          'purple': '#6a4e8c',
+                          'pink': '#b04870',
+                          'gray': '#8a847b',
+                          'ink': '#1c1a17'},
+               'fonts': {'display': {'family': 'Instrument Serif', 'weight': 400, 'tracking': -0.01},
+                         'body': {'family': 'Inter', 'weight': 400},
+                         'hand': {'family': 'Instrument Serif', 'weight': 400},
+                         'mono': {'family': 'JetBrains Mono', 'weight': 400}},
+               'stroke': {'rough': False, 'width': 2.5},
+               'radius': 8,
+               'tintStrength': 0.1,
+               'shadow': {'color': 'rgba(40,32,20,0.10)', 'blur': 24, 'y': 8},
+               'enter': {'shape': 'fade',
+                         'text': 'rise',
+                         'title': 'rise',
+                         'icon': 'fade',
+                         'image': 'fade',
+                         'list': 'rise',
+                         'code': 'fade',
+                         'chart': 'grow',
+                         'number': 'rise',
+                         'arrow': 'draw',
+                         'line': 'draw'},
+               'transition': 'fade',
+               'sfx': {'shape': 'pop',
+                       'arrow': 'whoosh',
+                       'line': 'whoosh',
+                       'icon': 'pop',
+                       'image': 'pop',
+                       'text': None,
+                       'title': None,
+                       'list': 'blip',
+                       'number': 'tick',
+                       'annotate': 'whoosh',
+                       'chart': 'whoosh',
+                       'code': 'type',
+                       'terminal': 'type',
+                       'burst': 'sparkle',
+                       'transition': 'swipe'},
+               'code': {'bg': '#1c1a17',
+                        'fg': '#f3eee6',
+                        'comment': '#8a847b',
+                        'keyword': '#e0896f',
+                        'string': '#a9c49a',
+                        'number': '#e3b866',
+                        'fn': '#9cc3dd',
+                        'punct': '#bdb6aa',
+                        'lineNo': '#6b655d',
+                        'highlight': 'rgba(227,184,102,0.16)',
+                        'border': '#1c1a17'},
+               'terminal': {'bg': '#1c1a17',
+                            'fg': '#f3eee6',
+                            'prompt': '#e3b866',
+                            'muted': '#a49d92',
+                            'bar': '#2c2925'},
+               'caption': {'bg': 'rgba(28,26,23,0.86)', 'fg': '#fffdf9', 'active': '#e3b866'}}}
+
+
+PROMPT_KEYS = {
+    "node1-topics.md": "node1_topics",
+    "node1-script.md": "node1_script",
+    "node1-points.md": "node1_points",
+    "node1-point-script.md": "node1_point_script",
+    "node2-prompt.md": "node2_prompt",
+}
+
+# ---------------------------------------------------------------------------
+# 工作流总览（--workflow 打印；也是本文件的功能地图）
+# ---------------------------------------------------------------------------
+WORKFLOW_SUMMARY = r"""
+============================================================
+自动化产出简易视频 · 工作流总览
+============================================================
+
+【0. 数据流】
+  提示词 / 资料 / 现成知识点
+        │
+        ▼
+  节点1  DeepSeek（deepseek-v4-pro）+ prompts/node1-*.md
+        ├─ --topics  → output/topics.md
+        ├─ --topic   → script.yaml
+        ├─ --extract → output/points.md
+        └─ --book    → script.yaml
+        │
+        ▼
+  节点2  DeepSeek + prompts/node2-prompt.md + 主题令牌
+        └─ → index.html（自包含 Canvas 渲染器）
+        │
+        ▼
+  节点3  Playwright/Chromium 逐帧调用 window.renderFrame()
+        ├─ 预检：每秒 4 帧扫描整条时间轴
+        ├─ frames/frame-00000.png ...（逐帧截图）
+        └─ ffmpeg → output/<标题>_silent.mp4
+        │
+        ▼
+  节点4  edge-tts + ffmpeg
+        ├─ 逐场景配音 → audio/voice_XX.mp3
+        ├─ 标点规范化（只改标点，不改字）
+        ├─ 按 scene.start 延迟拼接 → audio/voice.mp3
+        ├─ srt/vtt 台词稿 + ASS 关键词高亮/弹跳
+        ├─ BGM：--bgm > Jamendo 授权曲库 > 本地 audio/bgm/
+        └─ 侧链闪避混音 + 烧字幕 → output/<标题>.mp4
+        │
+        ▼
+  节点5  ffprobe / volumedetect / raw RGB 像素分析
+        ├─ 编码 / 帧率 / 时长 / 体积 / 音量
+        ├─ 混音清单 / BGM 来源与 CC 授权 / 旁白时间窗与覆盖率
+        ├─ 边缘裁切 / 画面节奏（4fps）/ 构图占屏（1fps）
+        └─ ASS 字幕条数与关键词高亮
+
+【1. 唯一时间基准】
+  script.yaml 的 scene.start / scene.end（秒）同时驱动：
+    - 渲染器画面窗口（t = frameIndex / 30）
+    - 配音延迟（adelay = scene.start）
+    - 字幕绝对时间（edge-tts 句边界 + scene.start）
+  改任何场景边界都必须同时重生成渲染器和配音。
+
+【2. 脚本生成（节点1）】
+  1) 五幕情绪曲线（45 秒；其他时长按比例缩放）：
+       钩子 0–5s / 共情 5–15s / 拆解 15–30s / 顿悟 30–40s / 金句 40–45s
+     每幕必须有 role：钩子 / 共情 / 拆解 / 顿悟 / 金句。
+  2) Golden 3s 钩子：只允许极端假设 / 扎心拷问 / 预期反转；
+     前 3 秒禁用「大家好、今天、本期、入门、简介、让我们、有没有想过」。
+  3) 金句 meta.golden_line ≤20 字，最后一幕用 title 停留 ≥2 秒，全片最多 2 句。
+  4) 视觉母题 meta.visual_motif 至少贯穿 3 幕：出现 → 变形 → 爆发/收束。
+  5) 视觉奇观 meta.spectacle + 对应元素 spectacle: true；
+     标准：尺度反差 / 数量冲击 / 意外运动 / 视觉比喻 / 颜色突变（任意两条）。
+  6) 旁白：单句 ≤20 字（程序兜底 ≤24），只写在 narration，绝不能写进 elements；
+     每幕 1–3 个 highlight，必须原样出现在该幕旁白里。
+  7) 语速：场景时长 ≥ 字数/3.2 + 0.8 秒；目标 3.2–3.5 字/秒；
+     45 秒约 144–157 字，60 秒约 192–210 字。
+  8) 视觉聚焦：每幕一个 focus: true 的元素，occupancy ≥0.30（推荐 0.40–0.65）。
+  9) BGM 推荐 meta.bgm：歌曲、艺术家、版本、segment_start/end（mm:ss，≥20 秒）、
+     lyric_cue、instrumental、mood、bpm、英文 jamendo_query、jamendo_tags、
+     fallback_queries；meta.bgm_style 作为本地兜底风格。
+ 10) 选题（--topics）：10 行固定格式，至少 7 行关乎日常生活/拖延/认知/效率/时间，
+     至少 3 个「极端假设」钩子，钩子 ≤18 字。
+ 11) 拆书（--extract）：5–10 个知识点，只使用材料事实，格式：
+     ## 序号. 标题 / 核心洞察 / 选题类型 / 一句话核心 / 奇观画面 / 原文依据。
+
+【3. 渲染器生成（节点2）】
+  硬契约：
+    window.FPS=30、window.DURATION、window.TOTAL_FRAMES、
+    window.renderFrame(frameIndex) 纯函数；?frame=N 只渲染该帧并置 __RENDER_DONE__。
+  确定性：同帧号同画面；禁止 Date.now/performance.now 影响画面；
+    粒子/尾迹/星点用 mulberry32 等固定种子 PRNG，禁止 Math.random()。
+  运动：入场 easeOutBack、位移/转场 easeInOutCubic、数据增长 easeOutCubic；
+    镜头 smootherstep；禁止 linear；虚拟摄影机必须夹紧。
+  视觉：背景层 drawBackground + 母题层 drawMotif + 数据文字层三层；
+    motifAt(t) 提供跨场景连续母题状态；drawMotif 至少 3 幕递进。
+  节奏：每 2–3 秒一次可感知变化；静止不超过 4 秒；前 3 秒 ≥2 次视觉事件；
+    第 0 帧有可见主体；长驻留元素要分段推进或确定性自主运动。
+  金句：最后一幕独立可截屏卡片，居中无遮挡，停留 ≥2 秒；压黑只放最后 0.5–1 秒。
+  转场：除片尾压黑外禁止整屏淡入淡出/黑场/硬切；场景边界用几何形变衔接。
+  安全区：左右 120px、上下 80px；底部 160px 留给节点4 字幕；文字不裁切不重叠。
+  禁止：实拍/真人/人脸/照片、3D、景深光照、流体烟火毛发布料、外部网络资源。
+  静态审计：HTML 完整性、契约、无外链、缓动定义与实际调用、drawMotif 调用数、
+    drawBackground/motifAt、focus/occupancy、固定种子 PRNG、Canvas 路径绘制、
+    无 linear、无 Math.random、无真实时钟、旁白逐句不泄漏。
+
+【4. 渲染（节点3）】
+  查看器 viewport 1920×1080，deviceScaleFactor=1。
+  预检：step=max(1,floor(30/4))，只调用 renderFrame 不截图，提前抓运行时错误。
+  逐帧：renderFrame(i) → 等两次 requestAnimationFrame → page.screenshot(PNG)。
+  合成：ffmpeg -framerate 30 -i frames/frame-%05d.png
+        -c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium。
+  --clean 在合成后删除 frames/。
+
+【5. 配音与字幕（节点4）】
+  标点规范化：换行→逗号；半角→全角；合并重复标点；超长分句补呼吸逗号；
+    只改标点不改字，highlight 仍原样可定位。
+  TTS：默认 zh-CN-XiaoxiaoNeural、+5%，edge-tts 同时输出句级 SRT；
+    Windows 上用 UTF-8 文本文件，避免命令行代码页损坏中文。
+  时间轴：配音起点 = scene.start；字幕绝对时间 = 句边界 + scene.start。
+  srt/vtt：完整台词稿；相邻字幕重叠时前一条提前 0.02s 结束。
+  ASS：1920×1080、微软雅黑 62px、MarginV=96、每行 ≤18 字；
+    整句淡入 + 92%→102%→100% 回弹；关键词荧光黄 #fcd34d，
+    顿悟/反转/奇观/金句用警示红 #ef4444；按标点加权字符位置估算出现时刻，
+    140ms 放大 114%，再 140ms 回落；ASS 颜色是 BGR。
+  同文去重：字幕与该幕画面 title 完全同文时，srt/vtt 保留，ASS 跳过烧录。
+  配音拼接：adelay=<ms>:all=1 → amix=normalize=0 → apad → -t 截断。
+  混音：人声 aformat 48kHz 立体声 → asplit=2（主轨 + 侧链触发）；
+    BGM -stream_loop -1 + atrim + 首尾 afade + volume；
+    sidechaincompress threshold=0.05 ratio=8 attack=20 release=300；
+    amix=normalize=0；--no-duck 时等音量直接混。
+  视频：烧字幕重新编码 libx264 crf18；不烧字幕 -c:v copy；
+    音频 aac 192k；-t 显式截断（不用 -shortest）；+faststart。
+  混音清单 .audio.json（version 2）：标题、配音参数、BGM 来源/曲目/许可证/署名/
+    参考片段/切入秒数、每幕配音时长与规范化文本。
+
+【6. BGM 三级链】
+  1) --bgm <文件>：最高优先级。
+  2) Jamendo：有 JAMENDO_CLIENT_ID + meta.bgm + 未加 --no-jamendo。
+     组装最多 4 条检索词；/v3.0/tracks/ 搜索；过滤 NC、优先器乐/可下载；
+     打分：器乐 +8、可商用 +5、非 ND +2、时长 +2/+1、标签重合 ≤+4；
+     下载 audio/bgm/jamendo-<id>.mp3（>10KB 才复用，.part 再 rename）；
+     按 reference segment_start 选切入秒数并夹紧到音轨长度−视频长度。
+  3) 本地：audio/bgm/<style>.* → audio/bgm-<style>.* → audio/<style>.* →
+     文件名关键词 → audio/bgm.mp3 → audio/bgm/ 唯一音频。
+  授权边界：Jamendo 返回的是 CC 授权替代曲，不是模型推荐的商业原曲；
+    发布需按 attribution 署名；免费 API 适合非商业，商用需逐首确认或另授权。
+  为什么不接剪映：无桌面版公开 API；CEF+Qt 自绘控件 UIAutomation 不可用；
+    草稿加密；ToS 限制自动化；软件内可试听 ≠ 可下载/可商用。因此不接入。
+
+【7. 质检（节点5）】
+  视频流 h264 / 音频流 aac / 30fps / 时长误差 ≤0.5s / 体积 ≥100KB；
+  max_volume < -60dB 硬失败，< -20dB 告警；
+  可选黑帧检测（blackdetect d=0.5 pix_th=0.10）；
+  .audio.json：BGM 是否真的挂上、闪避、曲目、许可证、署名、参考推荐；
+  旁白时间窗（超出场景结束 +0.3s 告警）、覆盖率（<75% 告警）；
+  边缘裁切：1fps、640×360、内侧 3px 窄带、亮度陡变 ≥30 计一次，
+    单边 ≥2 次算裁切，≥30% 采样帧硬失败；
+  节奏：4fps、320×180、相邻帧平均亮度差阈值 0.5，
+    静止 >4s 告警、前 3 秒变化 <2 告警、最长静止 >8s 加强告警；
+  构图：1fps，前景=亮度≥32 或色度≥40，16×9 网格外接框，
+    主体占屏中位 <30% 或低占屏帧 >40% 告警；
+  ASS：Dialogue 条数与关键词颜色数；存在但无事件告警。
+
+【8. 产物命名】
+  meta.title 清洗 Windows 非法字符/控制字符、去尾部点和空格、80 字符上限、
+  保留设备名加前导下划线。默认覆盖同名产物；--unique 追加 _2/_3。
+  output/<标题>.mp4、<标题>_silent.mp4、<标题>.srt/.vtt/.ass/.audio.json。
+
+【9. 重跑策略】
+  只改旁白/高亮：改 YAML → 复用 HTML 重跑节点3→5。
+  只改画面：改 HTML 或 --force-node2 → 重跑节点3→5。
+  改场景边界：必须同时重生成渲染器与配音，三者共用一个时间基准。
+  脚本超时：优先缩短旁白，不要先动场景边界。
+  验收以节点5 为准：旁白时间窗、节奏、ASS 事件数三项必看。
+
+【10. 命令速查】
+  py -3 main.py --topics "领域"
+  py -3 main.py --topic "选题" --duration 45
+  py -3 main.py --material 资料.txt --index 1
+  py -3 main.py --points output/points.md --index 1
+  py -3 main.py --script script.yaml
+  py -3 main.py --script script.yaml --name "自定义标题" --unique
+  py -3 main.py --script script.yaml --no-jamendo --bgm audio/bgm/my.mp3
+  py -3 main.py --script script.yaml --force-node2 --clean
+  py -3 main.py --script script.yaml --skip-node4
+  py -3 main.py node1 --topics "二进制" --out output/topics.md
+  py -3 main.py node2 --script script.yaml --theme midnight --out index.html
+  py -3 main.py render --html index.html --script script.yaml --clean
+  py -3 main.py audio --script script.yaml --video output/x_silent.mp4 --out output/x.mp4
+  py -3 main.py qa --script script.yaml --video output/x.mp4 --silent output/x_silent.mp4
+  py -3 main.py setup --check
+"""
+
+# ---------------------------------------------------------------------------
+# 日志与通用工具
+# ---------------------------------------------------------------------------
+_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR", "") == ""
+_C = {
+    "reset": "\x1b[0m" if _COLOR else "",
+    "green": "\x1b[32m" if _COLOR else "",
+    "red": "\x1b[31m" if _COLOR else "",
+    "yellow": "\x1b[33m" if _COLOR else "",
+    "cyan": "\x1b[36m" if _COLOR else "",
+    "dim": "\x1b[2m" if _COLOR else "",
+}
+
+
+def info(message: str) -> None:
+    print(f"{_C['cyan']}{message}{_C['reset']}", flush=True)
+
+
+def ok(message: str) -> None:
+    print(f"{_C['green']}✓{_C['reset']} {message}", flush=True)
+
+
+def warn(message: str) -> None:
+    print(f"{_C['yellow']}!{_C['reset']} {message}", flush=True)
+
+
+def fail(message: str) -> None:
+    print(f"{_C['red']}✗{_C['reset']} {message}", file=sys.stderr, flush=True)
+
+
+def dim(message: str) -> None:
+    print(f"{_C['dim']}{message}{_C['reset']}", flush=True)
+
+
+def die(message: str, code: int = 1):
+    fail(message)
+    raise SystemExit(code)
+
+
+def parse_args(argv):
+    """解析 --key value / --key=value / --flag；返回 {key: str|True}。"""
+    out = {}
+    positionals = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "-h":
+            out["help"] = True
+            i += 1
+            continue
+        if a.startswith("--"):
+            body = a[2:]
+            if "=" in body:
+                key, value = body.split("=", 1)
+                out[key] = value
+                i += 1
+                continue
+            nxt = argv[i + 1] if i + 1 < len(argv) else None
+            if nxt is not None and not nxt.startswith("--"):
+                out[body] = nxt
+                i += 2
+            else:
+                out[body] = True
+                i += 1
+            continue
+        positionals.append(a)
+        i += 1
+    if positionals:
+        out["_positionals"] = positionals
+    return out
+
+
+def arg_str(args, key, default=""):
+    value = args.get(key)
+    return value if isinstance(value, str) else default
+
+
+def arg_num(args, key, default):
+    value = args.get(key)
+    try:
+        if value is None or value is True or value == "":
+            return default
+        return float(value) if "." in str(value) else int(str(value))
+    except Exception:
+        return default
+
+
+def arg_bool(args, key):
+    return bool(args.get(key))
+
+
+def ensure_dir(path):
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def rel(path):
+    try:
+        return os.path.relpath(str(path), os.getcwd())
+    except Exception:
+        return str(path)
+
+
+def human_size(num):
+    units = ["B", "KB", "MB", "GB"]
+    n = float(num)
+    i = 0
+    while n >= 1024 and i < len(units) - 1:
+        n /= 1024.0
+        i += 1
+    return f"{n:.0f}{units[i]}" if i == 0 else f"{n:.1f}{units[i]}"
+
+
+def dir_size(path):
+    total = 0
+    p = Path(path)
+    if not p.exists():
+        return 0
+    for item in p.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def ffmpeg_bin():
+    return os.environ.get("FFMPEG_BIN", "ffmpeg")
+
+
+def ffprobe_bin():
+    return os.environ.get("FFPROBE_BIN", "ffprobe")
+
+
+def run_cmd(cmd, cwd=None, capture=False):
+    """执行外部命令（列表参数），可选捕获输出。"""
+    if not capture:
+        dim("$ " + " ".join(str(x) for x in cmd))
+    proc = subprocess.run(
+        [str(x) for x in cmd],
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.STDOUT if capture else None,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc.returncode != 0:
+        if capture and proc.stdout:
+            print(proc.stdout[-4000:], file=sys.stderr)
+        raise RuntimeError(f"命令退出码 {proc.returncode}：{' '.join(str(x) for x in cmd[:3])}…")
+    return proc.stdout or ""
+
+
+def try_capture(cmd, timeout=None):
+    try:
+        proc = subprocess.run(
+            [str(x) for x in cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        return proc.returncode, proc.stdout or ""
+    except Exception as exc:
+        return -1, str(exc)
+
+
+def probe_duration(file):
+    try:
+        out = subprocess.run(
+            [ffprobe_bin(), "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(file)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ).stdout.strip()
+        value = float(out)
+        return value if math.isfinite(value) else None
+    except Exception:
+        return None
+
+
+def probe_json(file):
+    try:
+        out = subprocess.run(
+            [ffprobe_bin(), "-v", "error", "-print_format", "json",
+             "-show_format", "-show_streams", str(file)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ).stdout
+        return json.loads(out)
+    except Exception:
+        return None
+
+
+def strip_code_fence(text):
+    """剥离 AI 输出外层的 ```html 代码块围栏，并裁剪到真正 HTML 范围。"""
+    t = str(text or "").strip()
+    t = re.sub(r"^```[a-zA-Z]*\s*\n?", "", t)
+    t = re.sub(r"\n?```\s*$", "", t).strip()
+    m = re.search(r"<!DOCTYPE\s+html|<html[\s>]", t, re.I)
+    if m and m.start() > 0:
+        t = t[m.start():]
+    end = t.lower().rfind("</html>")
+    if end != -1:
+        t = t[: end + len("</html>")]
+    return t.strip()
+
+
+def strip_fence(text):
+    return re.sub(r"\n?```\s*$", "", re.sub(r"^\s*```[a-zA-Z]*\s*\n?", "", str(text or ""))).strip()
+
+
+def read_yaml(path):
+    if yaml is None:
+        die("缺少 PyYAML。安装：py -3 -m pip install pyyaml")
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        return yaml.safe_load(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        warn(f"YAML 解析失败：{p}（{exc}）")
+        return None
+
+
+def write_text(path, text):
+    p = Path(path)
+    ensure_dir(p.parent)
+    p.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+    return p
+
+
+def fmt_time(sec):
+    s = max(0, round(float(sec)))
+    return f"{int(s // 60):02d}:{int(s % 60):02d}"
+
+
+def unique(items):
+    out = []
+    seen = set()
+    for item in items:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def tokenize_words(text):
+    """粗略按空白/标点切词，仅供日志与查找。"""
+    return [x for x in re.split(r"[\s,;，。；]+", str(text or "")) if x]
+
+
+# ---------------------------------------------------------------------------
+# 产物命名（等价 lib/naming.js）
+# ---------------------------------------------------------------------------
+INVALID_CHARS = re.compile(r'[\u0000-\u001f<>:"/\\|?*]')
+RESERVED_NAMES = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.I)
+MAX_BASE_CHARS = 80
+
+
+def sanitize_title(value, fallback="未命名视频"):
+    s = INVALID_CHARS.sub(" ", str(value if value is not None else ""))
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[. ]+$", "", s)
+    if not s:
+        s = fallback
+    if RESERVED_NAMES.match(s):
+        s = "_" + s
+    if len(s) > MAX_BASE_CHARS:
+        s = s[:MAX_BASE_CHARS]
+        s = re.sub(r"[. ]+$", "", s).strip()
+    return s or fallback
+
+
+def base_name_from_script(script, script_path="", explicit=""):
+    if explicit:
+        return sanitize_title(explicit)
+    title = ""
+    if isinstance(script, dict) and isinstance(script.get("meta"), dict):
+        title = script["meta"].get("title") or ""
+    fallback = Path(script_path).stem if script_path else "未命名视频"
+    return sanitize_title(title or fallback, fallback)
+
+
+def artifact_paths(directory, base):
+    d = Path(directory)
+    return [d / (base + ".mp4"), d / (base + "_silent.mp4"), d / (base + ".audio.json")]
+
+
+def is_base_taken(directory, base):
+    return any(p.exists() for p in artifact_paths(directory, base))
+
+
+def resolve_base_name(directory, base, unique_flag=False):
+    if not unique_flag or not is_base_taken(directory, base):
+        return base
+    i = 2
+    candidate = f"{base}_{i}"
+    while is_base_taken(directory, candidate):
+        i += 1
+        candidate = f"{base}_{i}"
+    return candidate
+
+
+def output_paths(directory, base):
+    d = Path(directory)
+    return {
+        "base": base,
+        "video": d / (base + ".mp4"),
+        "silent": d / (base + "_silent.mp4"),
+        "manifest": d / (base + ".audio.json"),
+        "srt": d / (base + ".srt"),
+        "vtt": d / (base + ".vtt"),
+        "ass": d / (base + ".ass"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 提示词读取（默认用内嵌文本；--prompt-dir 可覆盖）
+# ---------------------------------------------------------------------------
+def read_prompt(filename, prompt_dir=None):
+    key = PROMPT_KEYS.get(filename)
+    if prompt_dir:
+        p = Path(prompt_dir) / filename
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+    if key and PROMPTS.get(key):
+        return PROMPTS[key]
+    die(f"找不到提示词：{filename}（内嵌 PROMPTS 为空，且未找到外部文件）")
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek 流式客户端（等价 lib/deepseek.js）
+# ---------------------------------------------------------------------------
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-v4-pro"
+
+
+def load_api_key():
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if key:
+        return key
+    fail("未找到环境变量 DEEPSEEK_API_KEY。")
+    print(
+        """
+请先设置 API Key 后重试：
+
+  PowerShell（当前会话）:
+    $env:DEEPSEEK_API_KEY = "sk-xxxxxxxx"
+
+  PowerShell（永久，写入用户环境变量）:
+    [Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY","sk-xxxxxxxx","User")
+
+  cmd:
+    set DEEPSEEK_API_KEY=sk-xxxxxxxx
+
+  bash / Git Bash:
+    export DEEPSEEK_API_KEY=sk-xxxxxxxx
+""",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
+def resolve_deepseek_options(args, default_max_tokens=8192):
+    base_url = os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    model = arg_str(args, "model") or os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL)
+    max_tokens_value = arg_str(args, "max-tokens") or os.environ.get(
+        "DEEPSEEK_MAX_TOKENS", str(default_max_tokens)
+    )
+    try:
+        max_tokens = int(max_tokens_value)
+    except Exception:
+        max_tokens = default_max_tokens
+    temperature = arg_num(args, "temperature", 0.7)
+    stall_ms = int(float(os.environ.get("DEEPSEEK_STALL_TIMEOUT", "240")) * 1000)
+    return {
+        "api_key": load_api_key(),
+        "base_url": base_url,
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": float(temperature),
+        "stall_ms": stall_ms,
+    }
+
+
+def call_deepseek(api_key, base_url, model, system_prompt, user_prompt,
+                  max_tokens, temperature, stall_ms, response_format=None):
+    """SSE 流式调用 DeepSeek；返回 {content, reasoning, usage}。"""
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": int(max_tokens),
+        "temperature": float(temperature),
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if response_format:
+        body["response_format"] = response_format
+
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "text/event-stream",
+        },
+        method="POST",
+    )
+
+    content = []
+    reasoning = []
+    usage = None
+    last_paint = 0.0
+    started = time.time()
+
+    def paint(force=False):
+        nonlocal last_paint
+        now = time.time()
+        if not force and now - last_paint < 0.5:
+            return
+        last_paint = now
+        phase = "生成中" if content else "思考中"
+        r_text = f"（推理 {sum(len(x) for x in reasoning)} 字符）" if reasoning else ""
+        sys.stdout.write(f"\r  {phase}… 正文 {sum(len(x) for x in content)} 字符{r_text}   ")
+        sys.stdout.flush()
+
+    try:
+        res = urllib.request.urlopen(req, timeout=max(30, stall_ms / 1000.0))
+        status = getattr(res, "status", 200)
+        if status >= 400:
+            detail = res.read().decode("utf-8", "replace")
+            raise RuntimeError(f"DeepSeek 返回 HTTP {status}\n{detail[:800]}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        hint = ""
+        if exc.code == 401:
+            hint = "\n  → API Key 无效或已过期，请检查 DEEPSEEK_API_KEY。"
+        elif exc.code == 402:
+            hint = "\n  → 账户余额不足。"
+        elif exc.code == 404:
+            hint = f'\n  → 模型 "{model}" 不存在，可用：deepseek-v4-pro、deepseek-flash。'
+        elif exc.code == 400:
+            hint = "\n  → 请求参数被拒绝，检查 DEEPSEEK_MODEL 是否为该账号可用模型。"
+        raise RuntimeError(f"DeepSeek 返回 HTTP {exc.code}{hint}\n{detail[:800]}")
+    except (socket.timeout, TimeoutError) as exc:
+        raise RuntimeError(
+            f"流式响应停滞超过 {stall_ms // 1000} 秒，已中断。"
+            f"可重试，或用 DEEPSEEK_STALL_TIMEOUT 调大该阈值。{exc}"
+        )
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            raise RuntimeError(
+                f"流式响应停滞超过 {stall_ms // 1000} 秒，已中断。"
+                f"可重试，或用 DEEPSEEK_STALL_TIMEOUT 调大该阈值。"
+            )
+        raise RuntimeError(f"DeepSeek 连接失败：{reason}")
+
+    try:
+        for raw in res:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(payload)
+            except Exception:
+                continue
+            choices = chunk.get("choices") or []
+            delta = (choices[0] or {}).get("delta") if choices else None
+            if isinstance(delta, dict):
+                if delta.get("reasoning_content"):
+                    reasoning.append(str(delta["reasoning_content"]))
+                if delta.get("content"):
+                    content.append(str(delta["content"]))
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            paint()
+    except (socket.timeout, TimeoutError):
+        raise RuntimeError(
+            f"流式响应停滞超过 {stall_ms // 1000} 秒，已中断。"
+            f"已收到正文 {sum(len(x) for x in content)} 字符。"
+        )
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            raise RuntimeError(
+                f"流式响应停滞超过 {stall_ms // 1000} 秒，已中断。"
+                f"已收到正文 {sum(len(x) for x in content)} 字符。"
+            )
+        raise
+    finally:
+        try:
+            res.close()
+        except Exception:
+            pass
+
+    paint(force=True)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    elapsed = time.time() - started
+    if usage:
+        usage["_elapsed"] = elapsed
+    return {"content": "".join(content), "reasoning": "".join(reasoning), "usage": usage}
+
+
+# ---------------------------------------------------------------------------
+# 主题令牌（等价 lib/theme.js）
+# ---------------------------------------------------------------------------
+FONT_STACK = {
+    "display": '700 {size}px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+    "body": '{size}px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+    "hand": '{size}px "Segoe Print", "Comic Sans MS", system-ui, sans-serif',
+    "mono": '{size}px ui-monospace, Menlo, Consolas, monospace',
+}
+FONT_ROLE_CN = {"display": "大标题", "body": "正文", "hand": "手写体（可选）", "mono": "等宽（代码/数字）"}
+
+
+def theme_names():
+    return list(THEMES.keys())
+
+
+def get_theme(name):
+    key = str(name or "").lower()
+    if key not in THEMES:
+        raise KeyError(f'未知风格 "{name}"。可用：{"、".join(THEMES.keys())}')
+    return THEMES[key]
+
+
+def _kv(obj):
+    if not isinstance(obj, dict):
+        return str(obj)
+    return "，".join(f"{k}=无" if v is None else f"{k}={v}" for k, v in obj.items())
+
+
+def theme_block(name):
+    t = get_theme(name)
+    lines = []
+    lines.append("## 视觉风格令牌（强制遵守，禁止自行发明配色）")
+    lines.append("")
+    lines.append(f"风格：**{t.get('name', name)}**{'（深色）' if t.get('dark') else '（浅色）'}")
+    lines.append("")
+    lines.append("### 基础色")
+    lines.append(f"- 背景 bg：{t.get('bg')}")
+    lines.append(f"- 主文字 ink：{t.get('ink')}")
+    lines.append(f"- 次要文字 muted：{t.get('muted')}")
+    lines.append(f"- 卡片/面板 surface：{t.get('surface')}")
+    lines.append(f"- 首选强调色 accent：{t.get('accent')}（取其语义色值）")
+    lines.append(f"- 语义色板：{_kv(t.get('colors') or {})}")
+    lines.append(f"- 圆角 radius：{t.get('radius')}px")
+    lines.append(f"- 淡色调强度 tintStrength：{t.get('tintStrength')}")
+    if t.get("shadow"):
+        lines.append(f"- 阴影：{_kv(t['shadow'])}")
+    else:
+        lines.append("- 阴影：无（扁平风格）")
+
+    lines.append("")
+    lines.append("### 线条")
+    stroke = t.get("stroke") or {}
+    if stroke.get("rough"):
+        lines.append(
+            f"- 手绘风：开启。roughness={stroke.get('roughness')}，bowing={stroke.get('bowing')}，"
+            f"线宽={stroke.get('width')}，填充方式={stroke.get('fillStyle')}"
+            + (f"，排线间距={stroke.get('hachureGap')}" if stroke.get("hachureGap") else "")
+            + "。用确定性的伪随机抖动模拟手绘，不要真的用 Math.random()。"
+        )
+        if stroke.get("texture"):
+            lines.append(f"- 纹理：{stroke['texture']}")
+    else:
+        lines.append(f"- 手绘风：关闭。干净直线，线宽={stroke.get('width', 3)}")
+        if stroke.get("glow"):
+            lines.append(f"- 发光：{stroke['glow']}px 外发光")
+
+    lines.append("")
+    lines.append("### 入场动画（元素类型 → 动画）")
+    lines.append(_kv(t.get("enter") or {}))
+    lines.append(f"- 场景转场：{t.get('transition')}")
+
+    lines.append("")
+    lines.append("### 代码块配色")
+    lines.append(_kv(t.get("code") or {}))
+    lines.append("")
+    lines.append("### 终端配色")
+    lines.append(_kv(t.get("terminal") or {}))
+    lines.append("")
+    lines.append("### 字幕配色（仅供节点4 生成 ASS 字幕参考；渲染器禁止在画面里画任何字幕）")
+    lines.append(_kv(t.get("caption") or {}))
+
+    lines.append("")
+    lines.append("### 字体（只能用系统字体栈，禁止引入字体文件或 CDN）")
+    fonts = t.get("fonts") or {}
+    for role, stack in FONT_STACK.items():
+        src = fonts.get(role) or {}
+        src_text = f"　← 原风格为 {src.get('family')}，已替换为系统栈" if src.get("family") else ""
+        lines.append(f"- {role}（{FONT_ROLE_CN[role]}）：`{stack}`{src_text}")
+
+    lines.append("")
+    lines.append("### 使用要求")
+    lines.append("1. 上述色值必须原样使用，不要替换成近似色，也不要新增未列出的颜色。")
+    lines.append("   **唯一例外**：冲突/高潮的警示红 `#ef4444` 允许使用，但仅限情绪峰值与脉冲光晕，红色面积不超过画面 20%。")
+    lines.append("2. 需要区分层级时，用 tintStrength 把语义色与背景混合（混出淡色底），而不是引入新色。")
+    lines.append("3. 入场动画按上表逐元素类型执行；缓动按项目规则：入场 easeOutBack，位移/转场 easeInOutCubic，数据增长 easeOutCubic，禁止 linear。")
+    lines.append("4. 文字必须留出安全边距：左右不小于 120px，上下不小于 80px，底部 160px 留给节点4 的字幕；任何文字不得被画布边缘裁切。")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 本地 BGM 兜底（等价 lib/bgm.js）
+# ---------------------------------------------------------------------------
+AUDIO_EXTS = [".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus"]
+BGM_STYLES = {
+    "ambient_tech_tension": {
+        "label": "科技悬疑氛围",
+        "keywords": ["tech", "ambient", "tension", "suspense", "dark", "pulse", "cyber", "科技"],
+    },
+    "ambient_calm": {
+        "label": "平静氛围",
+        "keywords": ["calm", "ambient", "soft", "quiet", "piano", "warm", "平静"],
+    },
+    "lofi_focus": {
+        "label": "Lo-fi 专注",
+        "keywords": ["lofi", "lo-fi", "focus", "study", "chill", "beat", "专注"],
+    },
+    "cinematic_uplift": {
+        "label": "电影感上扬",
+        "keywords": ["cinematic", "uplift", "epic", "inspire", "hope", "rise", "上扬"],
+    },
+    "news_urgent": {
+        "label": "新闻快报紧迫感",
+        "keywords": ["news", "urgent", "ticker", "breaking", "tense", "快报"],
+    },
+    "minimal_pulse": {
+        "label": "极简脉冲",
+        "keywords": ["minimal", "pulse", "click", "clock", "tick", "极简"],
+    },
+}
+DEFAULT_BGM_STYLE = "ambient_tech_tension"
+
+
+def style_names():
+    return list(BGM_STYLES.keys())
+
+
+def is_known_style(style):
+    return str(style or "") in BGM_STYLES
+
+
+def style_label(style):
+    return BGM_STYLES.get(str(style or ""), {}).get("label", str(style or ""))
+
+
+def list_audio_files(directory):
+    d = Path(directory)
+    if not d.exists() or not d.is_dir():
+        return []
+    return [
+        p for p in d.iterdir()
+        if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+    ]
+
+
+def tokens_for(style):
+    known = BGM_STYLES.get(str(style or ""), {})
+    base = [x for x in re.split(r"[^a-z0-9一-龥]+", str(style or "").lower()) if x]
+    return list(dict.fromkeys(base + list(known.get("keywords", []))))
+
+
+def score_file(file, tokens):
+    stem = Path(file).stem.lower()
+    score = 0
+    for token in tokens:
+        t = str(token or "").lower()
+        if not t:
+            continue
+        if stem == t:
+            score += 10
+        elif t in stem:
+            score += 3
+    return score
+
+
+def resolve_bgm(script, bgm_arg="", style_arg="", cwd=None):
+    cwd = Path(cwd or os.getcwd())
+    meta = (script or {}).get("meta") if isinstance(script, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    requested_style = str(style_arg or meta.get("bgm_style") or DEFAULT_BGM_STYLE).strip() or DEFAULT_BGM_STYLE
+    style = requested_style
+    result = {
+        "path": None,
+        "exists": False,
+        "style": style,
+        "label": style_label(style),
+        "requestedStyle": requested_style,
+        "source": "none",
+    }
+    if bgm_arg:
+        p = Path(bgm_arg)
+        if not p.is_absolute():
+            p = cwd / p
+        return {**result, "path": p.resolve(), "exists": p.exists(), "source": "cli"}
+
+    audio_dir = cwd / "audio"
+    bgm_dir = audio_dir / "bgm"
+    for ext in AUDIO_EXTS:
+        for p in [bgm_dir / (style + ext), audio_dir / ("bgm-" + style + ext), audio_dir / (style + ext)]:
+            if p.exists():
+                return {**result, "path": p, "exists": True, "source": "style-exact"}
+
+    tokens = tokens_for(style)
+    scored = [
+        (score_file(p, tokens), p) for p in (list_audio_files(bgm_dir) + list_audio_files(audio_dir))
+    ]
+    scored = sorted([x for x in scored if x[0] > 0], key=lambda x: -x[0])
+    if scored:
+        return {**result, "path": scored[0][1], "exists": True, "source": "style-keyword"}
+
+    generic = audio_dir / "bgm.mp3"
+    if generic.exists():
+        return {**result, "path": generic, "exists": True, "source": "generic"}
+
+    leftover = list_audio_files(bgm_dir)
+    if len(leftover) == 1:
+        return {**result, "path": leftover[0], "exists": True, "source": "only-file"}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Jamendo 授权 BGM（等价 lib/jamendo.js）
+# ---------------------------------------------------------------------------
+JAMENDO_DEFAULT_API = "https://api.jamendo.com/v3.0/tracks/"
+JAMENDO_TIMEOUT_MS = 15000
+JAMENDO_DOWNLOAD_TIMEOUT_MS = 60000
+
+
+def jamendo_api_base():
+    return os.environ.get("JAMENDO_API_BASE", JAMENDO_DEFAULT_API)
+
+
+def get_client_id(explicit=""):
+    return str(explicit or os.environ.get("JAMENDO_CLIENT_ID", "")).strip()
+
+
+def parse_clock(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(float(value)) else None
+    s = str(value).strip()
+    parts = s.split(":")
+    try:
+        nums = [float(x) for x in parts]
+    except Exception:
+        nums = []
+    if nums and len(nums) == len(parts):
+        if len(nums) == 1:
+            return nums[0]
+        if len(nums) == 2:
+            return nums[0] * 60 + nums[1]
+        if len(nums) == 3:
+            return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    m = re.match(r"^([\d.]+)\s*s?$", s, re.I)
+    return float(m.group(1)) if m else None
+
+
+def format_clock(sec):
+    n = max(0, round(float(sec or 0)))
+    return f"{int(n // 60):02d}:{int(n % 60):02d}"
+
+
+def build_queries(meta):
+    meta = meta or {}
+    bgm = meta.get("bgm") or {}
+    raw = [bgm.get("jamendo_query")]
+    raw += list(bgm.get("fallback_queries") or []) if isinstance(bgm.get("fallback_queries"), list) else []
+    raw += list(bgm.get("queries") or []) if isinstance(bgm.get("queries"), list) else []
+    raw += list(bgm.get("jamendo_queries") or []) if isinstance(bgm.get("jamendo_queries"), list) else []
+    if bgm.get("mood"):
+        raw.append(str(bgm["mood"]))
+    tags = bgm.get("jamendo_tags")
+    if isinstance(tags, list) and tags:
+        raw.append(" ".join(str(x) for x in tags))
+    raw += tokens_for(meta.get("bgm_style") or DEFAULT_BGM_STYLE)[:4]
+    out = []
+    for q in raw:
+        s = re.sub(r"\s+", " ", str(q if q is not None else "")).strip()
+        if s and s not in out:
+            out.append(s)
+    return out[:4]
+
+
+def collect_tags(meta):
+    meta = meta or {}
+    bgm = meta.get("bgm") or {}
+    tags = []
+    for key in ("jamendo_tags", "tags"):
+        if isinstance(bgm.get(key), list):
+            tags += [str(t or "").lower() for t in bgm[key]]
+    tags = [re.sub(r"[^a-z0-9-]", "", t) for t in tags]
+    tags = [t for t in tags if t]
+    if bgm.get("instrumental"):
+        tags.append("instrumental")
+    return list(dict.fromkeys(tags))[:5]
+
+
+def read_license(track):
+    url = str(track.get("license_ccurl") or track.get("license_url") or "")
+    m = re.search(r"creativecommons\.org/licenses/([a-z-]+)", url, re.I)
+    code = (m.group(1) if m else "").lower()
+    nc = bool(re.search(r"(^|-)nc($|-)", code) or re.search(r"/nc/", url, re.I))
+    nd = bool(re.search(r"(^|-)nd($|-)", code) or re.search(r"/nd/", url, re.I))
+    label = "未标注"
+    if code:
+        label = f"CC {code.upper()}"
+    elif url:
+        label = "Jamendo 授权（以曲目页为准）"
+    return {
+        "url": url,
+        "code": code,
+        "nc": nc,
+        "nd": nd,
+        "commercial": not nc,
+        "attributionRequired": bool(url),
+        "label": label,
+    }
+
+
+def normalize_track(t):
+    musicinfo = t.get("musicinfo") or {}
+    tags_obj = musicinfo.get("tags") or {}
+    tags = list(tags_obj.get("genres") or []) + list(tags_obj.get("vartags") or [])
+    return {
+        "id": str(t.get("id") or ""),
+        "name": str(t.get("name") or ""),
+        "artist": str(t.get("artist_name") or ""),
+        "album": str(t.get("album_name") or ""),
+        "duration": float(t.get("duration") or 0),
+        "audio": str(t.get("audio") or ""),
+        "downloadUrl": str(t.get("audiodownload") or t.get("audio") or ""),
+        "downloadAllowed": t.get("audiodownload_allowed") is not False,
+        "shareUrl": str(t.get("shareurl") or ""),
+        "license": read_license(t),
+        "instrumental": str(musicinfo.get("vocalinstrumental") or "").lower() == "instrumental",
+        "tags": [str(x).lower() for x in tags],
+    }
+
+
+def jamendo_fetch_json(url, timeout_ms):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "auto-video-project/1.0 (BGM resolver)"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=max(1, timeout_ms / 1000.0)) as res:
+            text = res.read().decode("utf-8", "replace")
+            if getattr(res, "status", 200) >= 400:
+                raise RuntimeError(f"HTTP {res.status}: {text[:300]}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        raise RuntimeError(f"HTTP {exc.code}: {detail[:300]}")
+    data = json.loads(text)
+    headers = data.get("headers") or {}
+    status = headers.get("status")
+    if status and status != "success":
+        raise RuntimeError(f"Jamendo API 返回失败：{headers.get('error_message') or '未知错误'}")
+    return data
+
+
+def search_jamendo(client_id, queries, tags=None, instrumental=True, limit=12,
+                   timeout_ms=JAMENDO_TIMEOUT_MS):
+    tracks = {}
+    errors = []
+    used_queries = []
+    tags = tags or []
+    for q in queries:
+        used_queries.append(q)
+        base = {
+            "client_id": client_id,
+            "format": "json",
+            "limit": str(limit),
+            "search": q,
+            "include": "musicinfo licenses",
+            "audioformat": "mp32",
+            "audiodlformat": "mp32",
+            "order": "relevance",
+        }
+        if tags:
+            base["fuzzytags"] = "+".join(tags)
+
+        def try_once(with_instrumental):
+            params = dict(base)
+            if with_instrumental:
+                params["vocalinstrumental"] = "instrumental"
+            url = jamendo_api_base() + "?" + urllib.parse.urlencode(params)
+            return jamendo_fetch_json(url, timeout_ms)
+
+        try:
+            try:
+                data = try_once(instrumental)
+            except Exception as exc:
+                if instrumental and re.search(r"HTTP 400|vocalinstrumental", str(exc), re.I):
+                    data = try_once(False)
+                else:
+                    raise
+            for raw in (data.get("results") or []):
+                t = normalize_track(raw)
+                if not t["id"] or not t["downloadUrl"] or not t["downloadAllowed"]:
+                    continue
+                if t["license"]["nc"]:
+                    continue
+                if t["id"] not in tracks:
+                    tracks[t["id"]] = t
+        except Exception as exc:
+            errors.append(f"{q}：{exc}")
+        if len(tracks) >= max(6, limit // 2):
+            break
+    return {"tracks": list(tracks.values()), "errors": errors, "queries": used_queries}
+
+
+def score_track(t, video_duration=45, tags=None):
+    tags = tags or []
+    score = 0
+    if t.get("instrumental"):
+        score += 8
+    if t.get("license", {}).get("commercial"):
+        score += 5
+    if not t.get("license", {}).get("nd"):
+        score += 2
+    if float(t.get("duration") or 0) >= float(video_duration or 45):
+        score += 2
+    if float(t.get("duration") or 0) >= 60:
+        score += 1
+    overlap = len([x for x in t.get("tags", []) if x in tags])
+    score += min(4, overlap)
+    return score
+
+
+def pick_start_offset(reference_start, track_duration, video_duration):
+    try:
+        start = float(reference_start)
+    except Exception:
+        return 0
+    if not math.isfinite(start) or start <= 0:
+        return 0
+    if not track_duration or track_duration <= 0:
+        return start
+    usable = max(0, float(track_duration) - min(float(video_duration or 45), float(track_duration)))
+    return max(0, min(start, usable))
+
+
+def download_track(track, cwd=None, timeout_ms=JAMENDO_DOWNLOAD_TIMEOUT_MS):
+    cwd = Path(cwd or os.getcwd())
+    directory = ensure_dir(cwd / "audio" / "bgm")
+    file = directory / f"jamendo-{sanitize_title(track.get('id'), 'track')}.mp3"
+    if file.exists() and file.stat().st_size > 10 * 1024:
+        return file
+    req = urllib.request.Request(
+        track["downloadUrl"], headers={"User-Agent": "auto-video-project/1.0 (BGM resolver)"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=max(1, timeout_ms / 1000.0)) as res:
+            data = res.read()
+            if getattr(res, "status", 200) >= 400:
+                raise RuntimeError(f"下载 BGM 失败 HTTP {res.status}")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"下载 BGM 失败 HTTP {exc.code}")
+    if len(data) < 10 * 1024:
+        raise RuntimeError("下载的音频过小，疑似失败")
+    tmp = file.with_suffix(file.suffix + ".part")
+    tmp.write_bytes(data)
+    tmp.replace(file)
+    return file
+
+
+def reference_text(reference=None):
+    reference = reference or {}
+    song = reference.get("song") or reference.get("reference_song") or reference.get("title") or ""
+    artist = reference.get("artist") or reference.get("reference_artist") or ""
+    version = reference.get("version") or reference.get("reference_version") or "原版"
+    start = reference.get("segment_start") or ""
+    end = reference.get("segment_end") or ""
+    cue = reference.get("lyric_cue") or reference.get("reference_cue") or ""
+    head = " — ".join([x for x in (song, artist) if x]) or "未注明参考曲"
+    seg = f"，{start or '?'}–{end or '?'}" if (start or end) else ""
+    cue_text = f"，{cue}" if cue else ""
+    return f"{head}（{version}{seg}{cue_text}）"
+
+
+def build_attribution(track):
+    lic = track.get("license") or {}
+    where = track.get("shareUrl") or f"https://www.jamendo.com/track/{track.get('id')}"
+    url = f"，{lic['url']}" if lic.get("url") else ""
+    return f"{track.get('name')} — {track.get('artist')}（{lic.get('label')}{url}，来源 Jamendo：{where}）"
+
+
+def resolve_jamendo_bgm(script, client_id, video_duration=45, cwd=None,
+                        limit=12, timeout_ms=JAMENDO_TIMEOUT_MS, on_log=None):
+    logger = on_log or (lambda _m: None)
+    cid = get_client_id(client_id)
+    if not cid:
+        return None
+    meta = (script or {}).get("meta") or {}
+    bgm = meta.get("bgm") or {}
+    queries = build_queries(meta)
+    tags = collect_tags(meta)
+    reference_start = parse_clock(bgm.get("segment_start"))
+    want_instrumental = bgm.get("instrumental") is not False
+
+    logger("Jamendo 搜索：" + " / ".join(queries))
+    found = search_jamendo(
+        client_id=cid,
+        queries=queries,
+        tags=tags,
+        instrumental=want_instrumental,
+        limit=limit,
+        timeout_ms=timeout_ms,
+    )
+    tracks = found["tracks"]
+    if not tracks:
+        detail = "；".join(found["errors"]) if found["errors"] else "没有可商用/可下载的匹配曲目"
+        raise RuntimeError(f"Jamendo 未找到可用 BGM（{detail}）")
+
+    ranked = sorted(
+        [{"track": t, "score": score_track(t, video_duration, tags)} for t in tracks],
+        key=lambda x: -x["score"],
+    )[:5]
+
+    last_error = None
+    for item in ranked:
+        track = item["track"]
+        try:
+            file = download_track(track, cwd=cwd, timeout_ms=JAMENDO_DOWNLOAD_TIMEOUT_MS)
+            if want_instrumental and not track.get("instrumental"):
+                logger(f"注意：{track.get('name')} 未标注为器乐，可能有人声，已按评分次选使用。")
+            start_offset = pick_start_offset(reference_start, track.get("duration"), video_duration)
+            reference = dict(bgm)
+            reference["segment_start"] = bgm.get("segment_start") or (
+                format_clock(reference_start) if reference_start is not None else ""
+            )
+            reference["text"] = reference_text(bgm)
+            style = str(meta.get("bgm_style") or DEFAULT_BGM_STYLE)
+            return {
+                "path": file,
+                "exists": True,
+                "source": "jamendo",
+                "style": style,
+                "label": style_label(style),
+                "startOffset": start_offset,
+                "reference": reference,
+                "track": {
+                    "id": track.get("id"),
+                    "name": track.get("name"),
+                    "artist": track.get("artist"),
+                    "album": track.get("album"),
+                    "duration": track.get("duration"),
+                    "shareUrl": track.get("shareUrl"),
+                    "instrumental": track.get("instrumental"),
+                    "tags": track.get("tags"),
+                },
+                "license": track.get("license"),
+                "attribution": build_attribution(track),
+                "query": found["queries"][-1] if found["queries"] else (queries[0] if queries else ""),
+            }
+        except Exception as exc:
+            last_error = exc
+            logger(f"下载失败，尝试下一首：{exc}")
+    raise last_error or RuntimeError("Jamendo 候选曲目均无法下载")
+
+
+# ---------------------------------------------------------------------------
+# 字幕（等价 lib/subtitle.js）
+# ---------------------------------------------------------------------------
+def parse_srt(text):
+    cues = []
+    if not text:
+        return cues
+    blocks = re.split(r"\n{2,}", str(text).replace("\r", ""))
+    for block in blocks:
+        lines = [line for line in block.split("\n") if line.strip()]
+        if not lines:
+            continue
+        ti = next((i for i, line in enumerate(lines) if "-->" in line), -1)
+        if ti == -1:
+            continue
+        m = re.search(
+            r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)",
+            lines[ti],
+        )
+        if not m:
+            continue
+        nums = [int(x) for x in m.groups()]
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = nums
+        body = "\n".join(lines[ti + 1:]).strip()
+        if not body:
+            continue
+        cues.append({
+            "start": h1 * 3600 + m1 * 60 + s1 + ms1 / 1000.0,
+            "end": h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0,
+            "text": body,
+        })
+    return cues
+
+
+def _pad(n, width=2):
+    return str(int(n)).zfill(width)
+
+
+def stamp(sec, sep=","):
+    s = max(0.0, float(sec))
+    hours = int(s // 3600)
+    minutes = int((s % 3600) // 60)
+    seconds = int(s % 60)
+    ms = int(round((s - math.floor(s)) * 1000))
+    return f"{_pad(hours)}:{_pad(minutes)}:{_pad(seconds)}{sep}{_pad(ms, 3)}"
+
+
+def offset_and_merge(segment_cues):
+    all_cues = []
+    for item in segment_cues:
+        cues = item.get("cues") or []
+        start_offset = float(item.get("start") or 0)
+        for cue in cues:
+            merged = dict(cue)
+            merged["start"] = float(cue["start"]) + start_offset
+            merged["end"] = float(cue["end"]) + start_offset
+            all_cues.append(merged)
+    all_cues.sort(key=lambda c: c["start"])
+    for i in range(len(all_cues) - 1):
+        if all_cues[i]["end"] > all_cues[i + 1]["start"]:
+            all_cues[i]["end"] = max(
+                all_cues[i]["start"] + 0.2, all_cues[i + 1]["start"] - 0.02
+            )
+    return all_cues
+
+
+def to_srt(cues):
+    return "".join(
+        f"{i + 1}\n{stamp(c['start'], ',')} --> {stamp(c['end'], ',')}\n{c['text']}\n\n"
+        for i, c in enumerate(cues)
+    )
+
+
+def to_vtt(cues):
+    return "WEBVTT\n\n" + "".join(
+        f"{i + 1}\n{stamp(c['start'], '.')} --> {stamp(c['end'], '.')}\n{c['text']}\n\n"
+        for i, c in enumerate(cues)
+    )
+
+
+ASS_DEFAULTS = {
+    "width": 1920,
+    "height": 1080,
+    "fontSize": 62,
+    "fontName": "Microsoft YaHei" if os.name == "nt" else "PingFang SC",
+    "marginV": 96,
+    "marginLR": 120,
+    "maxCharsPerLine": 18,
+    "highlightColor": "#fcd34d",
+    "warningColor": "#ef4444",
+}
+FALLBACK_KEYWORDS = [
+    "时间", "拖延", "计划", "效率", "焦虑", "专注", "手机", "截止",
+    "工作", "大脑", "注意力", "睡眠", "行动", "目标", "选择", "习惯",
+    "进度", "截止日期", "优先级", "精力",
+]
+PEAK_ROLES = {"顿悟", "反转", "奇观", "金句"}
+PEAK_EMOTIONS = {"顿悟", "金句"}
+PAUSE_WEIGHT = {
+    "，": 1.8, "、": 1.5, "；": 2.0, "：": 1.8,
+    ",": 1.4, ";": 1.8, ":": 1.6,
+    "。": 2.6, "！": 2.6, "？": 2.6,
+    ".": 2.2, "!": 2.2, "?": 2.2,
+    "…": 2.0, "—": 1.5,
+}
+
+
+def to_ass_color(hex_color):
+    h = str(hex_color or "#ffffff").replace("#", "")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", h):
+        return "&HFFFFFF&"
+    return f"&H{h[4:6]}{h[2:4]}{h[0:2]}&".upper()
+
+
+def ass_time(sec):
+    total_cs = int(round(max(0.0, float(sec or 0)) * 100))
+    h = total_cs // 360000
+    m = (total_cs // 6000) % 60
+    s = (total_cs // 100) % 60
+    cs = total_cs % 100
+    return f"{h}:{_pad(m)}:{_pad(s)}.{_pad(cs)}"
+
+
+def escape_reg_exp(text):
+    return re.sub(r"([.*+?^${}()|\[\]\\])", r"\\\1", str(text))
+
+
+def escape_ass_text(text):
+    return (
+        str(text)
+        .replace("\\", "＼")
+        .replace("{", "｛")
+        .replace("}", "｝")
+        .replace("\r\n", " ")
+        .replace("\n", " ")
+        .strip()
+    )
+
+
+def dedupe_texts(items):
+    seen = set()
+    out = []
+    for item in items:
+        s = str(item or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def pick_highlights(text, provided):
+    words = provided if isinstance(provided, list) else ([provided] if provided else [])
+    matched = [w for w in dedupe_texts(words) if w in text]
+    if matched:
+        return matched[:3]
+    numbers = re.findall(r"\d+(?:\.\d+)?%?", text)
+    lexicon = [w for w in FALLBACK_KEYWORDS if w in text]
+    return dedupe_texts(numbers + lexicon)[:3]
+
+
+def text_weight(text):
+    weight = 0.0
+    for ch in str(text or ""):
+        if ch.isspace():
+            weight += 0.6
+        else:
+            weight += PAUSE_WEIGHT.get(ch, 1)
+    return weight
+
+
+def wrap_lines(text, max_chars):
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return [""]
+    lines = []
+    rest = clean
+    while len(rest) > max_chars:
+        cut = -1
+        min_cut = max(4, int(max_chars * 0.55))
+        for i in range(min(max_chars, len(rest) - 1), min_cut - 1, -1):
+            if re.match(r"[，。、！？；：,.!?;:]", rest[i - 1]):
+                cut = i
+                break
+        if cut == -1:
+            cut = max_chars
+        lines.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    if rest:
+        lines.append(rest)
+    return [line for line in lines if line][:3]
+
+
+def build_runs(line, keywords):
+    kws = sorted(dedupe_texts(keywords), key=len, reverse=True)
+    if not kws:
+        return [{"text": line, "keyword": False}]
+    pattern = re.compile("|".join(escape_reg_exp(k) for k in kws))
+    runs = []
+    last = 0
+    for m in pattern.finditer(line):
+        if m.start() > last:
+            runs.append({"text": line[last:m.start()], "keyword": False})
+        runs.append({"text": m.group(0), "keyword": True})
+        last = m.end()
+    if last < len(line):
+        runs.append({"text": line[last:], "keyword": False})
+    return runs or [{"text": line, "keyword": False}]
+
+
+def is_peak(cue):
+    return str(cue.get("role") or "") in PEAK_ROLES or str(cue.get("emotion") or "") in PEAK_EMOTIONS
+
+
+def to_ass(cues, options=None):
+    o = dict(ASS_DEFAULTS)
+    if options:
+        o.update(options)
+    margin_v = int(o.get("marginV") or ASS_DEFAULTS["marginV"])
+    header = "\n".join([
+        "[Script Info]",
+        "; Generated by 自动化产出简易视频 / main.py",
+        "ScriptType: v4.00+",
+        f"PlayResX: {o['width']}",
+        f"PlayResY: {o['height']}",
+        "WrapStyle: 2",
+        "ScaledBorderAndShadow: yes",
+        "YCbCr Matrix: TV.709",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,{o['fontName']},{o['fontSize']},&H00FFFFFF,&H000000FF,&H00101010,&H96000000,-1,0,0,0,100,100,0,0,1,3,2,2,{o['marginLR']},{o['marginLR']},{margin_v},1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ])
+    events = []
+    for cue in cues:
+        text = str(cue.get("text") or "").strip()
+        if not text:
+            continue
+        duration = max(0.2, float(cue.get("end", 0)) - float(cue.get("start", 0)))
+        highlights = pick_highlights(text, cue.get("highlights"))
+        lines = wrap_lines(text, int(o["maxCharsPerLine"]))
+        total_weight = max(1.0, text_weight("".join(lines)))
+        key_color = o["warningColor"] if is_peak(cue) else o["highlightColor"]
+        global_weight = 0.0
+        rendered_lines = []
+        for line_index, line in enumerate(lines):
+            runs = build_runs(line, highlights)
+            out = ""
+            if line_index == 0:
+                out += "{\\fad(120,100)\\fscx92\\fscy92\\t(0,180,\\fscx102\\fscy102)\\t(180,300,\\fscx100\\fscy100)}"
+            line_weight = 0.0
+            for run in runs:
+                if run["keyword"]:
+                    ratio = (global_weight + line_weight) / total_weight
+                    delay = max(0, min(
+                        int(round(duration * 1000)) - 320,
+                        int(round(ratio * duration * 1000)),
+                    ))
+                    out += (
+                        f"{{\\c{to_ass_color(key_color)}"
+                        f"\\t({delay},{delay + 140},\\fscx114\\fscy114)"
+                        f"\\t({delay + 140},{delay + 280},\\fscx100\\fscy100)}}"
+                        + escape_ass_text(run["text"])
+                        + "{\\c&HFFFFFF&\\fscx100\\fscy100}"
+                    )
+                else:
+                    out += escape_ass_text(run["text"])
+                line_weight += text_weight(run["text"])
+            global_weight += text_weight(line)
+            rendered_lines.append(out)
+        body = "\\N".join(rendered_lines)
+        events.append(
+            f"Dialogue: 0,{ass_time(cue.get('start', 0))},{ass_time(cue.get('end', 0))},Default,,0,0,0,,{body}"
+        )
+    return header + "\n" + "\n".join(events) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# 节点1：选题 / 脚本 / 拆书知识点（等价 node1.js）
+# ---------------------------------------------------------------------------
+MAX_MATERIAL_CHARS = 100000
+TEXT_ONLY_TYPES = {"title", "subtitle", "text", "caption", "formula", "code"}
+ACT_ROLES = ["钩子", "共情", "拆解", "顿悟", "金句"]
+HOOK_TYPE_NAMES = ["极端假设", "扎心拷问", "预期反转"]
+DAILY_LIFE_HINT = re.compile(
+    "生活|拖延|认知|效率|时间|注意力|决策|情绪|手机|睡眠|工作|通勤|社交|日历|闹钟|转账|购物|学习"
+)
+
+
+def narration_chars(s):
+    return len(re.sub(r"[^\u4e00-\u9fa5a-zA-Z0-9]", "", str(s or "")))
+
+
+def find_visual_gaps(scene, limit_sec=3.0):
+    """元素时间窗覆盖检查：场景里不能被“没东西在动”的空窗填满。"""
+    try:
+        start = float(scene.get("start"))
+        end = float(scene.get("end"))
+    except (TypeError, ValueError):
+        return []
+    if not (math.isfinite(start) and math.isfinite(end)) or end <= start:
+        return []
+    els = scene.get("elements") if isinstance(scene.get("elements"), list) else []
+    intervals = []
+    for el in els:
+        at = el.get("at") if isinstance(el, dict) else None
+        if not isinstance(at, list) or len(at) < 2:
+            continue
+        try:
+            a, b = float(at[0]), float(at[1])
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(a) and math.isfinite(b)):
+            continue
+        a, b = max(a, start), min(b, end)
+        if b > a:
+            intervals.append((a, b))
+    intervals.sort()
+    gaps = []
+    cursor = start
+    for a, b in intervals:
+        if a - cursor > limit_sec:
+            gaps.append((cursor, a))
+        cursor = max(cursor, b)
+    if end - cursor > limit_sec:
+        gaps.append((cursor, end))
+    return gaps
+
+
+def _num(value):
+    try:
+        n = float(value)
+        return n if math.isfinite(n) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def validate_script_content(script, requested_duration):
+    """脚本内容自检：提示词是建议，这里把能机器判断的硬性要求查一遍。"""
+    warnings = []
+    meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    duration = _num(meta.get("duration") or requested_duration) or 0
+
+    golden = meta.get("golden_line")
+    if not golden:
+        warnings.append("缺少 meta.golden_line（金句），成片结尾少一个可截屏的传播点。")
+    elif len(str(golden)) > 20:
+        warnings.append(f"meta.golden_line 有 {len(str(golden))} 字，超过 20 字，不适合截屏。")
+    if not meta.get("visual_motif"):
+        warnings.append("缺少 meta.visual_motif（视觉母题），渲染器可能每个场景换一套图形。")
+
+    bgm_style = str(meta.get("bgm_style") or "").strip()
+    if not bgm_style:
+        warnings.append(
+            f"缺少 meta.bgm_style（BGM 风格），节点4 将默认使用 {DEFAULT_BGM_STYLE}。"
+            f"可选：{' / '.join(style_names())}"
+        )
+    elif not is_known_style(bgm_style):
+        warnings.append(
+            f'meta.bgm_style「{bgm_style}」不在推荐风格里（{" / ".join(style_names())}），'
+            "节点4 只能按文件名关键词尝试匹配。"
+        )
+
+    bgm = meta.get("bgm")
+    if not isinstance(bgm, dict):
+        warnings.append("缺少 meta.bgm（参考歌曲 + 具体片段 + Jamendo 检索词），只能按风格兜底选曲。")
+    else:
+        required = ["song", "artist", "version", "segment_start", "segment_end", "lyric_cue"]
+        missing = [k for k in required if not str(bgm.get(k) or "").strip()]
+        if missing:
+            warnings.append(f"meta.bgm 缺少字段：{'、'.join(missing)}；BGM 推荐要具体到歌名、版本和片段。")
+        start = parse_clock(bgm.get("segment_start"))
+        end = parse_clock(bgm.get("segment_end"))
+        if start is None:
+            warnings.append(f'meta.bgm.segment_start「{bgm.get("segment_start") or ""}」不是有效时间，应写成 mm:ss。')
+        if end is None:
+            warnings.append(f'meta.bgm.segment_end「{bgm.get("segment_end") or ""}」不是有效时间，应写成 mm:ss。')
+        if start is not None and end is not None:
+            if end <= start:
+                warnings.append("meta.bgm 的 segment_end 必须晚于 segment_start。")
+            elif end - start < 20:
+                warnings.append(f"meta.bgm 参考片段只有 {round(end - start)} 秒，建议至少 20 秒。")
+        if not isinstance(bgm.get("instrumental"), bool):
+            warnings.append("meta.bgm.instrumental 必须是 true / false，纯音乐要明确标 true。")
+        bpm = _num(bgm.get("bpm"))
+        if bpm is None or bpm < 40 or bpm > 220:
+            warnings.append(f'meta.bgm.bpm「{bgm.get("bpm")}」不是合理 BPM（40–220）。')
+        query = str(bgm.get("jamendo_query") or "").strip()
+        if not query:
+            warnings.append("缺少 meta.bgm.jamendo_query，节点4 只能用风格词兜底搜索。")
+        elif re.search(r"[\u4e00-\u9fa5]", query):
+            warnings.append("meta.bgm.jamendo_query 应使用英文声音特征词，不要写中文或歌名。")
+        if "fallback_queries" in bgm and not isinstance(bgm.get("fallback_queries"), list):
+            warnings.append("meta.bgm.fallback_queries 必须是数组。")
+        if "jamendo_tags" in bgm and not isinstance(bgm.get("jamendo_tags"), list):
+            warnings.append("meta.bgm.jamendo_tags 必须是数组。")
+
+    hook_types = meta.get("hook_type")
+    if isinstance(hook_types, list):
+        hook_text = " ".join(str(x) for x in hook_types)
+    else:
+        hook_text = str(hook_types or "")
+    if not re.search("极端假设|扎心拷问|预期反转", hook_text):
+        warnings.append("meta.hook_type 不是「极端假设 / 扎心拷问 / 预期反转」，开头可能留不住人。")
+    first_narration = str((scenes[0] if scenes else {}).get("narration") or "")
+    if re.match(r"^(大家好|今天|本期|入门|简介|让我们|有没有想过)", first_narration.strip()):
+        warnings.append(f"开场旁白使用了禁用词：「{first_narration[:12]}…」")
+    if not any(str(s.get("role") or "") == "金句" for s in scenes if isinstance(s, dict)):
+        warnings.append("没有 role: 金句 的场景，meta.golden_line 可能没有真正出现在画面里。")
+
+    if len(scenes) < 5:
+        warnings.append(f"全片只有 {len(scenes)} 个场景，五幕情绪曲线不完整。")
+    roles = {str(s.get("role") or "").strip() for s in scenes if isinstance(s, dict)}
+    missing_roles = [r for r in ACT_ROLES if r not in roles]
+    if missing_roles:
+        warnings.append(f"缺少情绪幕：{'、'.join(missing_roles)}（role 必须是 钩子/共情/拆解/顿悟/金句）。")
+
+    first = scenes[0] if scenes and isinstance(scenes[0], dict) else {}
+    if str(first.get("role") or "").strip() != "钩子":
+        warnings.append("第一个场景的 role 不是「钩子」，开场可能不够抓人。")
+    first_end = _num(first.get("end"))
+    if first_end is not None and first_end > max(6, duration * 0.12):
+        warnings.append(f"钩子场景持续到 {first_end}s，太长；前 3–5 秒必须完成钩子。")
+    first_elements = first.get("elements") if isinstance(first.get("elements"), list) else []
+    if not any(isinstance(el, dict) and str(el.get("type") or "") not in TEXT_ONLY_TYPES for el in first_elements):
+        warnings.append("开场只有文字元素，没有图形/运动；第一帧不能是纯文字淡入。")
+
+    early_events = 0
+    for el in first_elements:
+        at = el.get("at") if isinstance(el, dict) else None
+        if isinstance(at, list) and at:
+            a = _num(at[0])
+            if a is not None and a <= 3:
+                early_events += 1
+    if early_events < 2:
+        warnings.append(f"前 3 秒只有 {early_events} 个视觉事件，至少需要 2 个。")
+    first_sentence = re.split(r"[。！？!?]", first_narration)[0].strip()
+    first_sentence_chars = narration_chars(first_sentence)
+    if first_sentence_chars > 18:
+        warnings.append(f"开场第一句 {first_sentence_chars} 字，超过 18 字，冲击力会被稀释。")
+
+    rate_tolerance = 0.05
+    total_chars = sum(narration_chars(s.get("narration")) for s in scenes if isinstance(s, dict))
+    if duration > 0 and total_chars > 0:
+        rate = total_chars / duration
+        target_min = math.ceil(duration * 3.2)
+        target_max = math.floor(duration * 3.5)
+        if rate > 3.5 + rate_tolerance:
+            warnings.append(
+                f"旁白密度 {rate:.2f} 字/秒，高于 3.5；{duration:g} 秒建议 {target_min}–{target_max} 字，"
+                f"当前 {total_chars} 字，需压缩 {total_chars - target_max} 字左右。"
+            )
+        elif rate < 3.2 - rate_tolerance:
+            warnings.append(
+                f"旁白密度 {rate:.2f} 字/秒，低于目标 3.2；{duration:g} 秒建议 {target_min}–{target_max} 字，"
+                f"当前 {total_chars} 字，还差 {max(0, target_min - total_chars)} 字。旁白太稀会变成中段大段空白。"
+            )
+
+    for s in scenes:
+        if not isinstance(s, dict):
+            continue
+        chars = narration_chars(s.get("narration"))
+        scene_start = _num(s.get("start"))
+        scene_end = _num(s.get("end"))
+        if not chars or scene_start is None or scene_end is None or scene_end <= scene_start:
+            continue
+        scene_dur = scene_end - scene_start
+        voice_est = chars / 3.3 + 0.4
+        if voice_est < scene_dur * 0.6:
+            warnings.append(
+                f"场景 {s.get('id') or '?'} 预计配音只有 {voice_est:.1f}s，占场景 {scene_dur:g}s 的 "
+                f"{round((voice_est / scene_dur) * 100)}%，画面后半段会空。"
+            )
+
+    cursor = 0.0
+    for s in scenes:
+        if not isinstance(s, dict):
+            continue
+        start = _num(s.get("start"))
+        end = _num(s.get("end"))
+        if start is not None and abs(start - cursor) > 0.05:
+            warnings.append(f"场景 {s.get('id') or '?'} 从 {start}s 开始，与上一场景结束 {cursor}s 不相接。")
+        if end is None or start is None or end <= start:
+            warnings.append(f"场景 {s.get('id') or '?'} 的 end 不合法（{s.get('end')}）。")
+        else:
+            cursor = end
+    if duration > 0 and abs(cursor - duration) > 0.5:
+        warnings.append(f"场景总时长 {cursor:g}s，与 meta.duration {duration:g}s 不一致。")
+
+    for s in scenes:
+        if not isinstance(s, dict):
+            continue
+        text = str(s.get("narration") or "").strip()
+        if not text:
+            warnings.append(f"场景 {s.get('id') or '?'} 没有旁白，画面会变成默片。")
+            continue
+        sentences = [x.strip() for x in re.split(r"[。！？!?]+", text) if x.strip()]
+        too_long = next((x for x in sentences if narration_chars(x) > 24), None)
+        if too_long:
+            warnings.append(
+                f"场景 {s.get('id') or '?'} 有一句 {narration_chars(too_long)} 字，"
+                f"超过 20 字上限：「{too_long[:16]}…」"
+            )
+        if re.match(r"^(首先|其次|然后|最后|因此|综上所述)", text):
+            warnings.append(f"场景 {s.get('id') or '?'} 以连接词开头，删掉它会更像人话。")
+        m = re.search(r"我们可以看|不难发现|众所周知", text)
+        if m:
+            warnings.append(f"场景 {s.get('id') or '?'} 使用了书面套话：「{m.group(0)}」。")
+    last_narration = str((scenes[-1] if scenes and isinstance(scenes[-1], dict) else {}).get("narration") or "").strip()
+    if re.search(r"(世界|一切|力量|未来|全人类|宇宙)[。！？!?]?$", last_narration):
+        warnings.append("结尾旁白落在大词上，最后一句要落回具体的人、身体或日常动作。")
+
+    for s in scenes:
+        if not isinstance(s, dict):
+            continue
+        els = s.get("elements") if isinstance(s.get("elements"), list) else []
+        if not els:
+            warnings.append(f"场景 {s.get('id') or '?'} 没有任何 elements，渲染器将无内容可画。")
+            continue
+        for a, b in find_visual_gaps(s):
+            warnings.append(
+                f"场景 {s.get('id') or '?'} 在 {a:.1f}–{b:.1f}s 没有任何元素，会出现 {b - a:.1f}s 视觉空窗。"
+            )
+        no_ease = [el for el in els if isinstance(el, dict) and el.get("motion") and not el.get("easing")]
+        if no_ease:
+            warnings.append(f"场景 {s.get('id') or '?'} 有 {len(no_ease)} 个运动元素没写 easing，渲染器可能退回匀速。")
+        linear = [el for el in els if isinstance(el, dict) and re.search("linear", str(el.get("easing") or ""), re.I)]
+        if linear:
+            warnings.append(f"场景 {s.get('id') or '?'} 有 {len(linear)} 个元素使用 linear 缓动，禁止匀速。")
+
+    for s in scenes:
+        if not isinstance(s, dict):
+            continue
+        els = s.get("elements") if isinstance(s.get("elements"), list) else []
+        if not els:
+            continue
+        focus_els = [el for el in els if isinstance(el, dict) and el.get("focus") is True]
+        if not focus_els:
+            warnings.append(f"场景 {s.get('id') or '?'} 没有标 focus: true 的主焦点元素，渲染时容易主体过小、视线发散。")
+        elif len(focus_els) > 1:
+            warnings.append(f"场景 {s.get('id') or '?'} 有 {len(focus_els)} 个 focus: true，同一时刻只能有一个主焦点。")
+        for el in focus_els:
+            if el.get("occupancy") is None:
+                warnings.append(f"场景 {s.get('id') or '?'} 的主焦点没写 occupancy（建议 0.40–0.65，最低 0.30）。")
+                continue
+            occ = _num(el.get("occupancy"))
+            if occ is not None and occ < 0.3:
+                warnings.append(
+                    f"场景 {s.get('id') or '?'} 的主焦点 occupancy={occ:g}，低于 0.30，画面会显得空、主体太小。"
+                )
+
+    if not meta.get("spectacle"):
+        warnings.append("缺少 meta.spectacle（截屏级画面），成片少一个传播点。")
+    elif not any(
+        isinstance(el, dict) and el.get("spectacle") is True
+        for s in scenes if isinstance(s, dict)
+        for el in (s.get("elements") if isinstance(s.get("elements"), list) else [])
+    ):
+        warnings.append("meta.spectacle 已写，但没有任何元素标 spectacle: true，渲染器不会重点处理。")
+
+    for s in scenes:
+        if not isinstance(s, dict):
+            continue
+        hl = s.get("highlight")
+        words = [str(x) for x in hl] if isinstance(hl, list) else ([str(hl)] if hl else [])
+        words = [w for w in words if w]
+        if not words:
+            warnings.append(f"场景 {s.get('id') or '?'} 缺少 highlight（字幕关键词高亮会退回到数字/兜底词库）。")
+            continue
+        if len(words) > 3:
+            warnings.append(f"场景 {s.get('id') or '?'} 有 {len(words)} 个 highlight，超过 3 个，字幕会花。")
+        missing = [w for w in words if w not in str(s.get("narration") or "")]
+        if missing:
+            warnings.append(f"场景 {s.get('id') or '?'} 的 highlight 词没出现在旁白里：{'、'.join(missing)}")
+
+    return warnings
+
+
+def validate_topics_content(text):
+    """选题列表自检。格式：选题名 | 类型 | 生活痛点映射 | 一句话核心 | 钩子类型 | 钩子 | 截屏级画面"""
+    warnings = []
+    lines = [
+        line.strip() for line in re.split(r"\r?\n", str(text or ""))
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if len(lines) != 10:
+        warnings.append(f"候选选题有 {len(lines)} 行，要求正好 10 行。")
+
+    daily = extreme = bad_field = long_hook = 0
+    for line in lines:
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 7:
+            bad_field += 1
+            continue
+        type_, pain, hook_type, hook = cols[1], cols[2], cols[4], cols[5]
+        if DAILY_LIFE_HINT.search(type_ + pain):
+            daily += 1
+        if any(t in hook_type for t in HOOK_TYPE_NAMES):
+            if "极端假设" in hook_type:
+                extreme += 1
+        else:
+            bad_field += 1
+        if narration_chars(hook) > 18:
+            long_hook += 1
+
+    if len(lines) == 10:
+        if daily < 7:
+            warnings.append(f"生活相关选题只有 {daily} 个，要求至少 7 个。")
+        if extreme < 3:
+            warnings.append(f"「极端假设」钩子只有 {extreme} 个，要求至少 3 个。")
+    if bad_field:
+        warnings.append(f"{bad_field} 行缺少字段或钩子类型不合法（必须是 极端假设/扎心拷问/预期反转）。")
+    if long_hook:
+        warnings.append(f"{long_hook} 个钩子超过 18 字，第一句会被稀释。")
+    return warnings
+
+
+def split_points(markdown):
+    """把知识点 markdown 按 "## " 切成独立条目。"""
+    parts = re.split(r"^##\s+", str(markdown or ""), flags=re.M)[1:]
+    if not parts:
+        return [{"title": "整份资料", "body": str(markdown or "").strip()}]
+    out = []
+    for part in parts:
+        lines = part.split("\n")
+        out.append({"title": lines[0].strip(), "body": "\n".join(lines).strip()})
+    return out
+
+
+def read_file_utf8(path, label="文件"):
+    p = Path(path)
+    if not p.exists():
+        die(f"找不到{label}：{p}")
+    data = p.read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", "replace")
+
+
+def node1_generate(args):
+    """节点1：调用 DeepSeek 生成内容，返回产出的文本与输出路径。"""
+    duration = arg_num(args, "duration", 45)
+    prompt_dir = arg_str(args, "prompt-dir") or None
+    mode = None
+    system_prompt = user_prompt = out_path = ""
+
+    if arg_str(args, "topics"):
+        mode = "topics"
+        out_path = str(Path(arg_str(args, "out") or "output/topics.md"))
+        system_prompt = read_prompt("node1-topics.md", prompt_dir)
+        user_prompt = f"领域 / 方向：{arg_str(args, 'topics')}\n请按提示词输出 10 个候选选题。"
+    elif arg_str(args, "topic"):
+        mode = "script"
+        out_path = str(Path(arg_str(args, "out") or "script.yaml"))
+        system_prompt = read_prompt("node1-script.md", prompt_dir)
+        user_prompt = (
+            f"选题：{arg_str(args, 'topic')}\n"
+            f"时长：{duration:g} 秒\n"
+            "分辨率：1920x1080，帧率：30fps\n\n"
+            "请写一条完整的视频脚本，只输出 YAML。"
+        )
+    elif arg_str(args, "extract"):
+        mode = "points"
+        out_path = str(Path(arg_str(args, "out") or "output/points.md"))
+        system_prompt = read_prompt("node1-points.md", prompt_dir)
+        material_file = Path(arg_str(args, "extract"))
+        if not material_file.exists():
+            die(f"找不到资料文件：{material_file.resolve()}")
+        material = read_file_utf8(material_file, "资料文件").strip()
+        if len(material) > MAX_MATERIAL_CHARS:
+            warn(f"资料 {len(material)} 字，超过 {MAX_MATERIAL_CHARS} 字，只取前 {MAX_MATERIAL_CHARS} 字。")
+            dim("  超长书籍建议先按章节切分，再分批拆知识点。")
+            material = material[:MAX_MATERIAL_CHARS]
+        if not material:
+            die("资料文件是空的。")
+        user_prompt = f"下面是要拆解的材料：\n\n<material>\n{material}\n</material>\n\n请按提示词拆出知识点。"
+    elif arg_str(args, "book"):
+        mode = "script"
+        out_path = str(Path(arg_str(args, "out") or "script.yaml"))
+        system_prompt = read_prompt("node1-script.md", prompt_dir) + "\n\n" + read_prompt(
+            "node1-point-script.md", prompt_dir
+        )
+        points_file = Path(arg_str(args, "book"))
+        if not points_file.exists():
+            die(f"找不到知识点文件：{points_file.resolve()}")
+        points = split_points(read_file_utf8(points_file, "知识点文件"))
+        index = max(1, min(len(points), int(arg_num(args, "index", 1)))) - 1
+        point = points[index]
+        info(f"[节点1] 共 {len(points)} 个知识点，使用第 {index + 1} 个：{point['title']}")
+        user_prompt = (
+            f"知识点：\n\n<point>\n## {point['body']}\n</point>\n\n"
+            f"时长：{duration:g} 秒\n分辨率：1920x1080，帧率：30fps\n\n"
+            "把这个知识点写成一条完整的视频脚本，只输出 YAML。"
+        )
+    else:
+        fail("请指定一种模式。")
+        print(NODE1_USAGE, file=sys.stderr)
+        raise SystemExit(1)
+
+    opts = resolve_deepseek_options(args, 16384)
+    info(f"[节点1] 模式：{ {'topics': '生成选题', 'script': '生成脚本', 'points': '拆书知识点'}[mode] }")
+    info(f"[节点1] 模型：{opts['model']}，时长：{'—' if mode == 'topics' else f'{duration:g}s'}")
+    info("[节点1] 正在请求 DeepSeek…")
+    started = time.time()
+    result = call_deepseek(
+        opts["api_key"], opts["base_url"], opts["model"],
+        system_prompt, user_prompt,
+        opts["max_tokens"], opts["temperature"], opts["stall_ms"],
+    )
+    content = result["content"]
+    usage = result["usage"]
+    elapsed = f"{time.time() - started:.1f}"
+    text = strip_fence(content)
+    if not text:
+        fail("模型没有返回正文内容。")
+        raise SystemExit(1)
+
+    if mode == "script":
+        try:
+            parsed = yaml.safe_load(text) if yaml else None
+        except Exception as exc:
+            bad_path = re.sub(r"\.ya?ml$", "", out_path, flags=re.I) + ".bad.yaml"
+            write_text(bad_path, text)
+            fail(f"模型输出的 YAML 无法解析：{exc}")
+            print(f"  原始输出已另存：{rel(bad_path)}", file=sys.stderr)
+            raise SystemExit(1)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("scenes"), list) or not parsed["scenes"]:
+            bad_path = re.sub(r"\.ya?ml$", "", out_path, flags=re.I) + ".bad.yaml"
+            write_text(bad_path, text)
+            fail("脚本缺少 scenes 数组。")
+            print(f"  原始输出已另存：{rel(bad_path)}", file=sys.stderr)
+            raise SystemExit(1)
+        declared = (parsed.get("meta") or {}).get("duration") if isinstance(parsed.get("meta"), dict) else None
+        if declared and abs(float(declared) - duration) > 0.01:
+            warn(f"脚本声明 {declared}s，与请求的 {duration:g}s 不一致。")
+        for w in validate_script_content(parsed, duration):
+            warn(f"[节点1] {w}")
+    elif mode == "topics":
+        for w in validate_topics_content(text):
+            warn(f"[节点1] {w}")
+
+    write_text(out_path, text)
+    print()
+    ok(f"[节点1] 完成 → {rel(out_path)}（耗时 {elapsed}s）")
+    if usage:
+        dim(
+            f"  token 用量：prompt {usage.get('prompt_tokens', '?')}，"
+            f"completion {usage.get('completion_tokens', '?')}，合计 {usage.get('total_tokens', '?')}"
+        )
+
+    if mode == "topics":
+        print("\n" + text + "\n")
+        dim(f'  下一步：挑一个选题，运行 py -3 main.py --topic "选题" --out script.yaml')
+    elif mode == "points":
+        count = len(split_points(text))
+        print("\n" + text[:1200] + ("\n…" if len(text) > 1200 else "") + "\n")
+        dim(f"  共 {count} 个知识点。下一步：py -3 main.py --book {rel(out_path)} --index 1")
+    else:
+        dim(f"  下一步：py -3 main.py node2 --script {rel(out_path)}")
+    return text, out_path
+
+
+NODE1_USAGE = """
+用法：
+  py -3 main.py node1 --topics "领域/方向"        生成 10 个候选选题
+  py -3 main.py node1 --topic "选题"              根据选题写视频脚本
+  py -3 main.py node1 --extract 资料.txt          从资料里拆知识点
+  py -3 main.py node1 --book points.md --index 1  把某个知识点写成视频脚本
+
+常用参数：
+  --out <文件>       输出路径（默认见上）
+  --duration <秒>    视频时长，默认 45
+  --model <名称>     deepseek-v4-pro / deepseek-flash
+"""
+
+
+# ---------------------------------------------------------------------------
+# 节点2：脚本 → 自包含 HTML 渲染器（等价 node2.js）
+# ---------------------------------------------------------------------------
+NODE2_MAX_TOKENS = 65536
+
+
+def _flatten_text(s):
+    return re.sub(r"[，。、！？：；\"'“”‘’（）\s]", "", str(s or ""))
+
+
+def audit_narration_leak(html, script):
+    """检查模型是否把旁白台词画进了画面（会与节点4 字幕重叠成双份）。"""
+    scene_list = (script or {}).get("scenes") or []
+    leaks = []
+    flat_html = _flatten_text(html)
+    for scene in scene_list:
+        if not isinstance(scene, dict):
+            continue
+        allowed = []
+        for el in (scene.get("elements") if isinstance(scene.get("elements"), list) else []):
+            if not isinstance(el, dict):
+                continue
+            for key in ("text", "content", "label"):
+                if el.get(key) is not None:
+                    value = _flatten_text(el[key])
+                    if value:
+                        allowed.append(value)
+                    break
+        sentences = [
+            s.strip() for s in re.split(r"[。！？!?；;]", str(scene.get("narration") or ""))
+            if s.strip()
+        ]
+        for sentence in sentences:
+            probe = _flatten_text(sentence)[:10]
+            if len(probe) < 8:
+                continue
+            if probe not in flat_html:
+                continue
+            if not any(probe in a for a in allowed):
+                leaks.append({"id": scene.get("id") or "?", "probe": probe})
+    return leaks
+
+
+def audit_html(html):
+    checks = []
+    checks.append({"name": "HTML 完整（以 </html> 结束）", "pass": bool(re.search(r"</html>\s*$", html.strip(), re.I))})
+    checks.append({"name": "暴露 window.renderFrame", "pass": bool(re.search(r"renderFrame\s*=", html))})
+    checks.append({"name": "支持 ?frame=N 截图模式", "pass": "__RENDER_DONE__" in html})
+    checks.append({"name": "暴露 window.TOTAL_FRAMES", "pass": bool(re.search(r"TOTAL_FRAMES\s*=", html))})
+
+    ext = []
+    if re.search(r"<script[^>]+src\s*=\s*[\"']https?:", html, re.I):
+        ext.append('<script src="http...">')
+    if re.search(r"<link[^>]+href\s*=\s*[\"']https?:", html, re.I):
+        ext.append('<link href="http...">')
+    if re.search(r"@import\s+url\(\s*[\"']?https?:", html, re.I):
+        ext.append("@import url(http...)")
+    if re.search(r"url\(\s*[\"']?https?:", html):
+        ext.append("CSS url(http...)")
+    checks.append({"name": "无外部网络依赖（可离线渲染）", "pass": not ext, "detail": ", ".join(ext)})
+    return checks
+
+
+def audit_visual_language(html):
+    """视觉语言静态自检：只查硬性要求有没有落进代码，不判断画面好坏。"""
+    checks = []
+    easing_names = ["easeInOutCubic", "easeOutCubic", "easeOutBack", "smootherstep"]
+    defined = [n for n in easing_names if re.search(n + r"\s*=", html)]
+    checks.append({
+        "name": "包含并定义平滑缓动函数（至少两种）",
+        "pass": len(defined) >= 2,
+        "detail": "、".join(defined) if defined else "未找到缓动函数定义",
+    })
+
+    code = re.sub(r"/\*[\s\S]*?\*/", "", html)
+    code = re.sub(r"^\s*//[^\n]*$", "", code, flags=re.M)
+    used = [n for n in easing_names if len(re.findall(r"\b" + n + r"\b", code)) >= 2]
+    checks.append({
+        "name": "缓动函数被实际调用（至少两种）",
+        "pass": len(used) >= 2,
+        "detail": "、".join(used) if used else "只定义未使用，或全部退回匀速",
+    })
+
+    motif_decls = len(re.findall(r"function\s+drawMotif\s*\(", html))
+    motif_calls = len(re.findall(r"\bdrawMotif\s*\(", html)) - motif_decls
+    checks.append({
+        "name": "视觉母题实际贯穿（drawMotif 至少 3 处场景调用）",
+        "pass": bool(re.search(r"drawMotif|visual[_-]?motif|motif", html, re.I)) and motif_calls >= 3,
+        "detail": f"检测到 {motif_calls} 处调用" if motif_calls > 0 else "没有可复用的 drawMotif 调用",
+    })
+
+    has_background = bool(re.search(r"function\s+drawBackground\s*\(", html))
+    checks.append({
+        "name": "三层结构：drawBackground + drawMotif 均已实现",
+        "pass": has_background and bool(re.search(r"function\s+drawMotif\s*\(", html)),
+        "detail": "缺少 drawMotif" if has_background else "缺少 drawBackground，背景层可能只是一块纯色",
+    })
+
+    checks.append({
+        "name": "母题按全局时间连续（motifAt 跨场景复用）",
+        "pass": bool(re.search(r"function\s+motifAt\s*\(|(?:const|let|var)\s+motifAt\s*=", html)),
+        "detail": "未找到 motifAt(t)：场景边界可能重新初始化母题，转场会断",
+    })
+
+    checks.append({
+        "name": "主焦点占屏约束落地（focus / occupancy / FOCUS_MIN）",
+        "pass": bool(re.search(r"\boccupancy\b|FOCUS_MIN|focus(?:Point|El)?\b|occupancyOf", code, re.I)),
+        "detail": "未找到 focus / occupancy 相关实现，主体可能仍然画得过小",
+    })
+
+    has_seeded = bool(re.search(
+        r"(?:function\s+)?(?:mulberry32|splitmix32|xorshift|sfc32|seedRandom|seededRandom|createRandom|createRng|makeRng|prng)\b",
+        html, re.I,
+    ))
+    has_fx = bool(re.search(r"粒子|particle|尾迹|trail|codeRain|星点|spark", html, re.I))
+    checks.append({
+        "name": "随机视觉元素使用固定种子 PRNG",
+        "pass": has_seeded or not has_fx,
+        "detail": "检测到粒子/尾迹，但没有 mulberry32 等固定种子函数" if has_fx and not has_seeded else "",
+    })
+
+    checks.append({
+        "name": "包含路径/数据图形绘制（arc/lineTo/贝塞尔）",
+        "pass": bool(re.search(r"\.arc\(|\.lineTo\(|\.bezierCurveTo\(|\.quadraticCurveTo\(", html)),
+    })
+
+    linear_ease = bool(re.search(r"\beaseLinear\b|\blinearEase\b|\blinear\s*\(\s*[a-zA-Z_$]", html, re.I))
+    checks.append({"name": "未使用线性匀速缓动", "pass": not linear_ease})
+
+    random_uses = len(re.findall(r"Math\.random\s*\(", html))
+    checks.append({
+        "name": "未使用未播种的 Math.random（保证逐帧确定性）",
+        "pass": random_uses == 0,
+        "detail": f"{random_uses} 处，请改用固定种子" if random_uses else "",
+    })
+
+    clock_uses = len(re.findall(r"\b(?:Date\.now|performance\.now)\s*\(", html))
+    checks.append({
+        "name": "renderFrame 不依赖真实时钟",
+        "pass": clock_uses == 0,
+        "detail": f"{clock_uses} 处 Date.now/performance.now（只在预览循环计时可忽略）" if clock_uses else "",
+    })
+    return checks
+
+
+def print_theme_names():
+    print("可用风格：")
+    for n in theme_names():
+        print("  - " + n)
+
+
+def node2_generate(args):
+    """节点2：调用 DeepSeek 生成 HTML，写盘并静态审计。"""
+    script_path = Path(arg_str(args, "script") or "script.yaml")
+    out_path = Path(arg_str(args, "out") or "index.html")
+    prompt_dir = arg_str(args, "prompt-dir") or None
+    if not script_path.exists():
+        die(f"找不到视频脚本：{script_path.resolve()}\n  提示：可先用示例脚本跑通流程，例如 --script examples/script.yaml")
+
+    base_prompt = read_prompt("node2-prompt.md", prompt_dir)
+    theme_name = arg_str(args, "theme") or "midnight"
+    try:
+        theme_text = theme_block(theme_name)
+    except KeyError as exc:
+        die(exc.args[0] if exc.args else str(exc))
+
+    script_text = script_path.read_text(encoding="utf-8")
+    system_prompt = base_prompt + "\n\n" + theme_text + "\n"
+    parsed = read_yaml(script_path)
+    if not isinstance(parsed, dict):
+        die("脚本不是合法 YAML，无法解析。")
+    if not isinstance(parsed.get("scenes"), list) or not parsed["scenes"]:
+        die("脚本缺少 scenes 数组。")
+    meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+    duration = meta.get("duration")
+    fps = meta.get("fps") or 30
+    if not duration:
+        warn("脚本 meta.duration 缺失，模型将按默认 30 秒处理。")
+
+    user_prompt = (
+        "下面是一份视频脚本，请严格按系统提示词的要求，输出完整的 HTML 渲染器。\n\n"
+        "```yaml\n" + script_text.strip() + "\n```\n"
+    )
+
+    opts = resolve_deepseek_options(args, NODE2_MAX_TOKENS)
+    if "temperature" not in args and os.environ.get("DEEPSEEK_TEMPERATURE") is None:
+        opts["temperature"] = 0.2
+    info(f"[节点2] 模型：{opts['model']}")
+    info(f"[节点2] 风格：{theme_name}")
+    info(f"[节点2] 脚本：{rel(script_path)}（{len(parsed['scenes'])} 个场景，{duration or 30} 秒 @ {fps}fps）")
+    info("[节点2] 正在请求 DeepSeek，长脚本可能需要几分钟…")
+
+    started = time.time()
+    result = call_deepseek(
+        opts["api_key"], opts["base_url"], opts["model"],
+        system_prompt, user_prompt,
+        opts["max_tokens"], opts["temperature"], opts["stall_ms"],
+    )
+    elapsed = f"{time.time() - started:.1f}"
+    html = strip_code_fence(result["content"])
+    if not html:
+        fail("模型没有返回正文内容。")
+        if result["reasoning"]:
+            print(
+                "  仅收到推理内容，通常说明 max_tokens 被推理消耗殆尽，请调大 DEEPSEEK_MAX_TOKENS。",
+                file=sys.stderr,
+            )
+        raise SystemExit(1)
+
+    ensure_dir(out_path.parent)
+    out_path.write_text(html, encoding="utf-8")
+    print()
+    ok(f"HTML 已生成：{out_path.resolve()}（{len(html) / 1024:.1f} KB，耗时 {elapsed}s）")
+    usage = result["usage"]
+    if usage:
+        details = usage.get("completion_tokens_details") or {}
+        reasoning_tokens = f"（其中推理 {details.get('reasoning_tokens')}）" if details else ""
+        dim(
+            f"  token 用量：prompt {usage.get('prompt_tokens', '?')}，"
+            f"completion {usage.get('completion_tokens', '?')}{reasoning_tokens}，"
+            f"合计 {usage.get('total_tokens', '?')}"
+        )
+
+    print()
+    info("[节点2] 产出物自检：")
+    checks = audit_html(html) + audit_visual_language(html)
+    hard_fail = False
+    for c in checks:
+        if c["pass"]:
+            ok(f"  {c['name']}")
+        else:
+            warn(f"  {c['name']}{' — ' + c['detail'] if c.get('detail') else ''}")
+            if c["name"].startswith("HTML 完整"):
+                hard_fail = True
+
+    leaks = audit_narration_leak(html, parsed)
+    if not leaks:
+        ok("  画面未出现旁白台词（字幕不会重复）")
+    else:
+        warn("  画面里疑似出现了旁白台词，成片会出现双份字幕：")
+        for leak in leaks:
+            warn(f"    场景 {leak['id']}：命中「{leak['probe']}…」")
+        dim("  字幕由节点4 以 srt/vtt 产出，HTML 不应再画一份。")
+        dim("  可用 --force-node2 重新生成试试；若反复出现，说明提示词需再加强。")
+
+    if hard_fail:
+        partial = re.sub(r"\.html?$", "", str(out_path), flags=re.I) + ".partial.html"
+        Path(partial).write_text(html, encoding="utf-8")
+        fail(f"生成的 HTML 不完整（疑似被截断），已另存：{partial}")
+        print("  建议：调大 DEEPSEEK_MAX_TOKENS，或把脚本拆成更少的场景后重试。", file=sys.stderr)
+        raise SystemExit(1)
+
+    print()
+    ok(f"[节点2] 完成。下一步：py -3 main.py render --html {rel(out_path)}")
+    return html, str(out_path)
+
+
+# ---------------------------------------------------------------------------
+# 节点3：Playwright 逐帧截图 + ffmpeg 合成（等价 render.js）
+# ---------------------------------------------------------------------------
+CHROMIUM_HINT = "https://playwright.dev/python/docs/browsers#install-browsers"
+
+
+def _find_chromium_executable():
+    explicit = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "").strip()
+    if explicit and Path(explicit).exists():
+        return explicit
+    roots = []
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            roots.append(Path(local) / "ms-playwright")
+        prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        roots.append(Path(prog) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    else:
+        roots.append(Path.home() / ".cache" / "ms-playwright")
+    for root in roots:
+        if root.is_file():
+            return str(root)
+        if not root.exists():
+            continue
+        patterns = ["chromium-*/chrome-win64/chrome.exe", "chromium-*/chrome-win/chrome.exe",
+                    "chromium-*/chrome-linux/chrome", "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium"]
+        found = []
+        for pat in patterns:
+            found += list(root.glob(pat))
+        if found:
+            found.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+            return str(found[0])
+    return ""
+
+
+def _launch_chromium(p):
+    try:
+        return p.chromium.launch(headless=True, args=["--no-sandbox"])
+    except Exception as exc:
+        msg = str(exc)
+        exe = _find_chromium_executable()
+        if not exe:
+            raise RuntimeError(
+                "无法启动 Playwright Chromium。请先安装：\n"
+                "  py -3 -m playwright install chromium\n"
+                f"  或设置 PLAYWRIGHT_CHROMIUM_EXECUTABLE 指向 chrome.exe\n  参考：{CHROMIUM_HINT}\n"
+                f"原始错误：{msg}"
+            )
+        dim(f"  Playwright 默认浏览器不可用，改用本机 Chromium：{exe}")
+        return p.chromium.launch(headless=True, args=["--no-sandbox"], executable_path=exe)
+
+
+def render_frames(args):
+    """节点3：渲染 HTML 为逐帧 PNG，并合成无声视频。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        die(
+            "缺少 Python Playwright 包。安装：\n"
+            "  py -3 -m pip install playwright\n"
+            "  py -3 -m playwright install chromium"
+        )
+
+    html_path = Path(arg_str(args, "html") or "index.html")
+    frames_dir = Path(arg_str(args, "frames") or "frames")
+    out_dir = Path(arg_str(args, "out") or "output")
+    width = int(arg_num(args, "width", 1920))
+    height = int(arg_num(args, "height", 1080))
+    clean_frames = arg_bool(args, "clean")
+    timeout_ms = int(float(arg_num(args, "load-timeout", 30)) * 1000)
+
+    if not html_path.exists():
+        die(f"找不到 HTML 文件：{html_path.resolve()}\n  提示：先运行 py -3 main.py node2 --script script.yaml 生成 index.html。")
+
+    parsed_script = None
+    script_path = Path(arg_str(args, "script")) if arg_str(args, "script") else None
+    if script_path:
+        parsed_script = read_yaml(script_path)
+        if isinstance(parsed_script, dict) and isinstance(parsed_script.get("meta"), dict):
+            script_fps = parsed_script["meta"].get("fps") or 30
+            if script_fps != 30:
+                warn(f"脚本 meta.fps = {script_fps}，但渲染契约固定为 30fps；以 HTML 内声明的 FPS 为准。")
+
+    if arg_str(args, "silent"):
+        silent_path = Path(arg_str(args, "silent"))
+    elif arg_str(args, "name"):
+        silent_path = out_dir / (sanitize_title(arg_str(args, "name")) + "_silent.mp4")
+    elif script_path:
+        silent_path = out_dir / (base_name_from_script(parsed_script, str(script_path)) + "_silent.mp4")
+    else:
+        silent_path = out_dir / "video_silent.mp4"
+
+    shutil.rmtree(frames_dir, ignore_errors=True)
+    ensure_dir(frames_dir)
+    ensure_dir(out_dir)
+    ensure_dir(silent_path.parent)
+
+    info("[节点3] 启动 Chromium…")
+    with sync_playwright() as p:
+        browser = _launch_chromium(p)
+        page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=1)
+        page_errors = [0]
+
+        def on_console(msg):
+            if msg.type == "error":
+                page_errors[0] += 1
+                print(f"  [页面 console.error] {msg.text}")
+
+        def on_pageerror(err):
+            page_errors[0] += 1
+            print(f"  [页面异常] {err}")
+
+        page.on("console", on_console)
+        page.on("pageerror", on_pageerror)
+
+        url = html_path.resolve().as_uri() + "?frame=0"
+        dim(f"  加载：{url}")
+        try:
+            page.goto(url, wait_until="load", timeout=timeout_ms)
+        except Exception as exc:
+            browser.close()
+            die(f"加载 HTML 超时或失败：{exc}")
+
+        try:
+            page.wait_for_function("window.__RENDER_DONE__ === true", timeout=timeout_ms)
+        except Exception:
+            browser.close()
+            fail("等待 window.__RENDER_DONE__ 超时。")
+            print(
+                "  说明：HTML 未实现截图模式。带 ?frame=N 打开时，应只渲染第 N 帧，"
+                "并在渲染完成后设置 window.__RENDER_DONE__ = true。\n"
+                "  处理：检查 index.html（必要时重新生成），或调大 --load-timeout。",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        meta = page.evaluate(
+            "() => ({ FPS: window.FPS, DURATION: window.DURATION, "
+            "TOTAL_FRAMES: window.TOTAL_FRAMES, hasRenderFrame: typeof window.renderFrame === 'function' })"
+        )
+        if not meta.get("hasRenderFrame"):
+            browser.close()
+            die("HTML 未暴露 window.renderFrame 函数，无法逐帧渲染。")
+
+        fps = int(arg_num(args, "fps", meta.get("FPS") or 30))
+        total = int(meta.get("TOTAL_FRAMES") or round(float(meta.get("DURATION") or 30) * fps))
+        if total <= 0:
+            browser.close()
+            die(f"无法确定总帧数（TOTAL_FRAMES={meta.get('TOTAL_FRAMES')}, DURATION={meta.get('DURATION')}）。")
+
+        info("[节点3] 预检：扫描整条时间轴…")
+        step = max(1, fps // 4)
+        sweep_errors = []
+        for f in range(0, total, step):
+            try:
+                page.evaluate("frame => window.renderFrame(frame)", f)
+            except Exception as exc:
+                msg = str(exc).split("\n")[0]
+                sweep_errors.append({"frame": f, "time": f"{f / fps:.2f}", "msg": msg})
+                if len(sweep_errors) >= 5:
+                    break
+        if sweep_errors:
+            browser.close()
+            fail(f"预检发现 renderFrame 在渲染时抛错，共 {len(sweep_errors)}{'+' if len(sweep_errors) >= 5 else ''} 处：")
+            for e in sweep_errors:
+                print(f"  第 {e['frame']} 帧（{e['time']}s）：{e['msg']}", file=sys.stderr)
+            print(
+                "\n  这类错误通常只在某一段动画被走到时才触发，靠静态检查看不出来。"
+                "\n  处理：重新生成 HTML（--force-node2），或按报错位置修正 index.html。",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        ok(f"  预检通过（{math.ceil(total / step)} 个采样点，无异常）")
+
+        est_gb = total * 2 * 1024 * 1024 / 1024 / 1024 / 1024
+        info(f"[节点3] 总帧数 {total}，帧率 {fps}fps，时长 {total / fps:.1f}s")
+        dim(f"  预计截图体积约 {est_gb:.1f}GB 存于 {rel(frames_dir)}/")
+        if est_gb > 2:
+            warn("  截图会占用较大磁盘空间，渲染完成后可用 --clean 自动清理。")
+
+        t0 = time.time()
+        for i in range(total):
+            try:
+                page.evaluate(
+                    """async (frame) => {
+                        window.renderFrame(frame);
+                        await new Promise(r => requestAnimationFrame(r));
+                        await new Promise(r => requestAnimationFrame(r));
+                    }""",
+                    i,
+                )
+            except Exception as exc:
+                browser.close()
+                die(f"第 {i} 帧渲染失败：{exc}")
+            page.screenshot(path=str(frames_dir / f"frame-{i:05d}.png"), type="png")
+            if i % 10 == 0 or i == total - 1:
+                pct = (i + 1) / total * 100
+                used = time.time() - t0
+                eta = f"{(used / (i + 1)) * (total - i - 1):.0f}" if i > 0 else "?"
+                sys.stdout.write(
+                    f"\r  [节点3] 渲染 {i + 1}/{total} ({pct:.1f}%) 已用 {used:.0f}s ETA {eta}s   "
+                )
+                sys.stdout.flush()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        browser.close()
+
+    if page_errors[0] > 0:
+        warn(f"[节点3] 渲染期间页面共报出 {page_errors[0]} 条错误，画面可能不完整。")
+
+    info(f"[节点3] 合成无声视频 → {rel(silent_path)}…")
+    run_cmd([
+        ffmpeg_bin(), "-y", "-framerate", str(fps),
+        "-i", str(frames_dir / "frame-%05d.png"),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium",
+        str(silent_path),
+    ])
+    duration = probe_duration(silent_path)
+    ok(
+        f"[节点3] 完成 → {silent_path.resolve()}（{f'{duration:.2f}s' if duration else '?'}，"
+        f"{human_size(silent_path.stat().st_size)}）"
+    )
+
+    if clean_frames:
+        freed = dir_size(frames_dir)
+        shutil.rmtree(frames_dir, ignore_errors=True)
+        ok(f"[节点3] 已清理截图目录，释放 {human_size(freed)}")
+    else:
+        dim(f"  截图保留在 {rel(frames_dir)}/（{human_size(dir_size(frames_dir))}），加 --clean 可自动清理")
+    return str(silent_path), {"fps": fps, "totalFrames": total, "duration": duration}
+
+
+# ---------------------------------------------------------------------------
+# 节点4：配音 / 字幕 / BGM 混音（等价 audio.js）
+# ---------------------------------------------------------------------------
+NO_PUNCT = re.compile(r"[^\u4e00-\u9fa5a-zA-Z0-9]")
+CLAUSE_SPLIT = re.compile(r"([，。！？；：、])")
+SAFE_BREAK_AFTER = set("的了是在有就也都还才把被让给对从到和与或这那里后前时下上中")
+BREAK_MARKERS = sorted([
+    "也就是说", "换句话说", "更重要的是", "你会发现", "你以为", "实际上",
+    "反过来", "问题是", "但是", "可是", "不过", "因为", "所以", "因此",
+    "如果", "假如", "其实", "结果", "然后", "而且", "于是",
+    "这时候", "直到", "就算", "哪怕", "与其", "不如",
+], key=len, reverse=True)
+VOICE_FMT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+
+
+def spoken_char_count(s):
+    return len(NO_PUNCT.sub("", str(s or "")))
+
+
+def insert_breathing_pauses(text, max_clause=20):
+    out = str(text or "")
+    for marker in BREAK_MARKERS:
+        out = re.sub(
+            r"([^，。！？；：、\s])(" + re.escape(marker) + ")",
+            r"\1，\2",
+            out,
+        )
+    tokens = CLAUSE_SPLIT.split(out)
+    result = []
+    for part in tokens:
+        if not part or CLAUSE_SPLIT.fullmatch(part):
+            result.append(part)
+            continue
+        s = part
+        guard = 0
+        while spoken_char_count(s) > max_clause * 1.5 and guard < 4:
+            guard += 1
+            chars = list(s)
+            mid = len(chars) // 2
+            cut = -1
+            d = 0
+            while d < len(chars) and cut < 0:
+                for i in (mid + d, mid - d):
+                    if 6 < i < len(chars) - 4 and chars[i - 1] in SAFE_BREAK_AFTER:
+                        cut = i
+                        break
+                d += 1
+            if cut < 0:
+                cut = mid
+            if cut <= 0 or cut >= len(chars):
+                break
+            s = "".join(chars[:cut]) + "，" + "".join(chars[cut:])
+        result.append(s)
+    return "".join(result)
+
+
+def normalize_narration(raw):
+    """只改标点与断句，不改字；保证 highlight 仍原样可定位。"""
+    s = re.sub(r"\r\n?", "\n", str(raw or ""))
+    s = re.sub(r"[ \u00a0\u3000]+", " ", s).strip()
+    if not s:
+        return ""
+    s = re.sub(r"\n+", "，", s)
+    s = s.replace("?", "？").replace("!", "！").replace(";", "；").replace(",", "，")
+    s = re.sub(r"(?<!\d)\.(?!\d)", "。", s)
+    s = re.sub(r"([\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])", r"\1", s)
+    s = re.sub(r"\s+([，。！？；：、])", r"\1", s)
+    s = re.sub(r"([，。！？；：、])\s+", r"\1", s)
+    s = re.sub(r"，{2,}", "，", s)
+    s = re.sub(r"。{2,}", "。", s)
+    s = re.sub(r"！{2,}", "！", s)
+    s = re.sub(r"？{2,}", "？", s)
+    s = re.sub(r"；{2,}", "；", s)
+    s = re.sub(r"[，、；：]+(?=[。！？])", "", s)
+    s = re.sub(r"([。！？])[，、；：]+", r"\1", s)
+    s = re.sub(r"([。！？])[。！？]+", r"\1", s)
+    s = re.sub(r"^[，、；：]+", "", s)
+    s = re.sub(r"；\s*$", "。", s)
+
+    quoted = re.sub(r"[”’\"'」』）)]+$", "", s)
+    tail = s[len(quoted):]
+    if not re.search(r"[。！？…]$", quoted):
+        s = quoted + "。" + tail
+
+    pieces = []
+    for seg in re.split(r"(?<=[。！？])", s):
+        m = re.match(r"^([\s\S]*?)([。！？]?)$", seg)
+        body, end = (m.group(1), m.group(2)) if m else (seg, "")
+        pieces.append(insert_breathing_pauses(body) + end)
+    s = "".join(pieces)
+    return re.sub(r"[，、；：]+(?=[。！？])", "", s).strip()
+
+
+def resolve_tts():
+    """定位 edge-tts。Windows 优先模块方式，避开 PATH 与商店别名问题。"""
+    env_cmd = os.environ.get("EDGE_TTS_CMD", "").strip()
+    if env_cmd:
+        parts = shlex.split(env_cmd)
+        code, _ = try_capture(parts + ["--version"])
+        if code == 0:
+            return {"parts": parts, "label": env_cmd, "source": "EDGE_TTS_CMD"}
+        warn(f"EDGE_TTS_CMD 指定的命令不可用：{env_cmd}")
+
+    candidates = []
+    exe = shutil.which("edge-tts")
+    if exe:
+        candidates.append({"parts": [exe], "label": exe, "source": "PATH"})
+    candidates.append({"parts": ["py", "-3", "-m", "edge_tts"], "label": "py -3 -m edge_tts", "source": "python -m"})
+    candidates.append({"parts": [sys.executable, "-m", "edge_tts"], "label": f"{Path(sys.executable).name} -m edge_tts", "source": "python -m"})
+    candidates.append({"parts": ["python3", "-m", "edge_tts"], "label": "python3 -m edge_tts", "source": "python -m"})
+    candidates.append({"parts": ["python", "-m", "edge_tts"], "label": "python -m edge_tts", "source": "python -m"})
+    for cand in candidates:
+        code, _ = try_capture(cand["parts"] + ["--version"], timeout=15)
+        if code == 0:
+            return cand
+    return None
+
+
+def has_ass_filter():
+    try:
+        out = subprocess.run(
+            [ffmpeg_bin(), "-hide_banner", "-filters"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", timeout=20,
+        ).stdout
+        return bool(re.search(r"\bass\b\s+V->V", out))
+    except Exception:
+        return False
+
+
+def escape_filter_path(p):
+    """ffmpeg 滤镜里的路径转义：优先相对路径，正斜杠 + 转义过滤器语法字符。"""
+    try:
+        r = os.path.relpath(str(p), os.getcwd())
+    except Exception:
+        r = str(p)
+    if not r or r.startswith("..") or os.path.isabs(r):
+        r = str(p)
+    s = r.replace("\\", "/")
+    return re.sub(r"([':,\[\]])", r"\\\1", s)
+
+
+def normalize_sub_text(s):
+    return re.sub(r"[\s，。！？、；：,.!?;:'\"“”‘’（）()《》【】—…-]", "", str(s or ""))
+
+
+def synthesize_voice(segments, tts, voice, rate, tmp_dir, audio_dir, normalize_text=True):
+    ensure_dir(tmp_dir)
+    ensure_dir(audio_dir)
+    results = []
+    for i, seg in enumerate(segments):
+        tag = f"{int(seg['index']):02d}"
+        txt_file = Path(tmp_dir) / f"voice_{tag}.txt"
+        mp3_file = Path(audio_dir) / f"voice_{tag}.mp3"
+        srt_file = Path(tmp_dir) / f"voice_{tag}.srt"
+        original = str(seg.get("narration") or "").strip()
+        spoken = normalize_narration(original) or original if normalize_text else original
+        txt_file.write_text(spoken, encoding="utf-8")
+        preview = spoken[:24] + "…" if len(spoken) > 24 else spoken
+        sys.stdout.write(f"\r  [节点4] 配音 {i + 1}/{len(segments)}（场景 {seg['sceneId']}）{preview}          ")
+        sys.stdout.flush()
+        cmd = list(tts["parts"]) + [
+            "-f", str(txt_file),
+            "--voice", voice,
+            "--rate", rate,
+            "--write-media", str(mp3_file),
+            "--write-subtitles", str(srt_file),
+            "--no-progress",
+        ]
+        proc = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        if proc.returncode != 0:
+            sys.stdout.write("\n")
+            raise RuntimeError(
+                f"edge-tts 失败（场景 {seg['sceneId']}，退出码 {proc.returncode}）："
+                f"{(proc.stderr or '').strip()[-800:]}"
+            )
+        if not mp3_file.exists():
+            sys.stdout.write("\n")
+            raise RuntimeError(f"配音生成失败（未产出文件）：场景 {seg['sceneId']}")
+        duration = probe_duration(mp3_file)
+        cues = []
+        if srt_file.exists():
+            try:
+                cues = parse_srt(srt_file.read_text(encoding="utf-8"))
+            except Exception:
+                cues = []
+        cues = [
+            {
+                **c,
+                "highlights": list(seg.get("highlights") or []),
+                "role": seg.get("role") or "",
+                "emotion": seg.get("emotion") or "",
+                "titleTexts": list(seg.get("titleTexts") or []),
+            }
+            for c in cues
+        ]
+        results.append({
+            **seg,
+            "file": str(mp3_file),
+            "duration": duration,
+            "cues": cues,
+            "narration": spoken,
+            "narrationOriginal": original,
+            "textNormalized": spoken != original,
+        })
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return results
+
+
+NODE4_NO_TTS = """
+  安装方式（任选其一，推荐用模块方式以避免 PATH 问题）：
+
+    1) 本机已装 Python，则执行：
+         py -3 -m pip install --upgrade edge-tts
+       然后本程序会自动用 "py -3 -m edge_tts" 调用。
+
+    2) 或把 edge-tts 所在目录加入 PATH（Windows 上通常在
+       %LOCALAPPDATA%\\Programs\\Python\\Python3xx\\Scripts）。
+
+    3) 或直接指定命令：
+         --tts "C:\\path\\to\\edge-tts.exe"
+"""
+
+
+def audio_generate(args):
+    """节点4：逐场景配音 + 字幕 + BGM 混音，返回成片路径与清单路径。"""
+    script_path = Path(arg_str(args, "script") or "script.yaml")
+    voice = arg_str(args, "voice") or "zh-CN-XiaoxiaoNeural"
+    rate = arg_str(args, "rate") or "+5%"
+    bgm_volume = str(args.get("bgm-volume") or "0.25")
+    no_duck = arg_bool(args, "no-duck")
+    normalize_text = not arg_bool(args, "no-text-normalize")
+    subs_mode = "none" if arg_bool(args, "no-subs") else str(arg_str(args, "subs") or "burn").lower()
+    if subs_mode not in ("burn", "sidecar", "none"):
+        die(f"未知的 --subs 模式：{subs_mode}（可选 burn / sidecar / none）")
+
+    if not script_path.exists():
+        die(f"找不到脚本：{script_path.resolve()}")
+    script = read_yaml(script_path)
+    if not isinstance(script, dict) or not isinstance(script.get("scenes"), list):
+        die("脚本缺少 scenes 数组。")
+    meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+
+    base = base_name_from_script(script, str(script_path), arg_str(args, "name"))
+    out_dir = Path(arg_str(args, "out-dir") or "output")
+    default_paths = output_paths(out_dir, base)
+    out_path = Path(arg_str(args, "out")) if arg_str(args, "out") else default_paths["video"]
+
+    if arg_str(args, "video"):
+        video_path = Path(arg_str(args, "video"))
+    elif default_paths["silent"].exists():
+        video_path = default_paths["silent"]
+    else:
+        video_path = Path("output/video_silent.mp4")
+    if not video_path.exists():
+        die(f"找不到无声视频：{video_path.resolve()}\n  提示：先运行 py -3 main.py render --html index.html，或显式传 --video。")
+    video_duration = probe_duration(video_path)
+    if not video_duration:
+        die("无法读取无声视频时长，ffprobe 可能不可用。")
+
+    segments = []
+    cursor = 0.0
+    for index, scene in enumerate(script["scenes"]):
+        if not isinstance(scene, dict) or not str(scene.get("narration") or "").strip():
+            continue
+        start_raw = scene.get("start")
+        has_start = isinstance(start_raw, (int, float)) and math.isfinite(float(start_raw))
+        start = float(start_raw) if has_start else cursor
+        if not has_start:
+            warn(f'场景 "{scene.get("id") or index}" 未声明 start，按顺序推定为 {start:g}s。')
+        end_raw = scene.get("end")
+        scene_end = float(end_raw) if isinstance(end_raw, (int, float)) and math.isfinite(float(end_raw)) else None
+        hl = scene.get("highlight")
+        highlights = [str(x) for x in hl] if isinstance(hl, list) else ([str(hl)] if hl else [])
+        title_texts = [
+            str(el.get("text")) for el in (scene.get("elements") if isinstance(scene.get("elements"), list) else [])
+            if isinstance(el, dict) and str(el.get("type") or "") == "title" and el.get("text")
+        ]
+        segments.append({
+            "index": index,
+            "sceneId": scene.get("id") or str(index),
+            "narration": str(scene.get("narration")).strip(),
+            "start": start,
+            "sceneEnd": scene_end,
+            "highlights": highlights,
+            "role": str(scene.get("role") or ""),
+            "emotion": str(scene.get("emotion") or ""),
+            "titleTexts": title_texts,
+        })
+        cursor = scene_end if scene_end is not None else start
+
+    if not segments:
+        die("脚本中没有任何 narration，无法生成配音。")
+
+    tts = resolve_tts()
+    if not tts:
+        fail("未找到可用的 edge-tts。")
+        print(NODE4_NO_TTS, file=sys.stderr)
+        raise SystemExit(1)
+    if arg_str(args, "tts"):
+        parts = shlex.split(arg_str(args, "tts"))
+        if parts:
+            tts = {**tts, "parts": parts, "label": arg_str(args, "tts")}
+
+    info(f"[节点4] TTS：{tts['label']}")
+    info(f"[节点4] 音色：{voice}，语速：{rate}，共 {len(segments)} 段旁白")
+    dim(f"  旁白文本规范化：{'开启（统一标点 / 补呼吸停顿）' if normalize_text else '关闭'}")
+
+    audio_dir = ensure_dir(Path(arg_str(args, "audio-dir") or "audio"))
+    tmp_dir = audio_dir / ".txt"
+    voice_files = synthesize_voice(segments, tts, voice, rate, tmp_dir, audio_dir, normalize_text)
+    normalized_count = sum(1 for v in voice_files if v["textNormalized"])
+    if normalized_count:
+        dim(f"  {normalized_count}/{len(voice_files)} 段旁白因标点/断句被规范化。")
+
+    overflow = False
+    for v in voice_files:
+        if v["duration"] is None:
+            continue
+        end = v["start"] + v["duration"]
+        label = f"场景 {v['sceneId']}：旁白 {v['duration']:.1f}s，{fmt_time(v['start'])} 起"
+        if v["sceneEnd"] is not None and end > v["sceneEnd"] + 0.3:
+            warn(f"{label}，超出场景结束 {v['sceneEnd']:g}s（溢出 {end - v['sceneEnd']:.1f}s）")
+            overflow = True
+        if end > video_duration + 0.3:
+            warn(f"{label}，超出视频总长 {video_duration:.1f}s，结尾会被截断")
+            overflow = True
+    if overflow:
+        dim("  建议：精简旁白文案，或把该场景的 start 提前 / 加长场景时长。")
+
+    ensure_dir(out_path.parent)
+
+    sub_cues = []
+    ass_cues = []
+    ass_path = None
+    burn_subs = False
+    if subs_mode != "none":
+        sub_cues = offset_and_merge([{"cues": v["cues"], "start": v["start"]} for v in voice_files])
+        if sub_cues:
+            sub_base = out_path.stem
+            srt_path = out_path.parent / (sub_base + ".srt")
+            vtt_path = out_path.parent / (sub_base + ".vtt")
+            srt_path.write_text(to_srt(sub_cues), encoding="utf-8")
+            vtt_path.write_text(to_vtt(sub_cues), encoding="utf-8")
+            info(f"[节点4] 字幕：{len(sub_cues)} 条 → {rel(srt_path)} / .vtt")
+
+            ass_cues = []
+            for c in sub_cues:
+                titles = c.get("titleTexts") if isinstance(c.get("titleTexts"), list) else []
+                text = normalize_sub_text(c.get("text"))
+                if not any(text and normalize_sub_text(t) == text for t in titles):
+                    ass_cues.append(c)
+            if len(ass_cues) < len(sub_cues):
+                dim(f"  {len(sub_cues) - len(ass_cues)} 条字幕与画面大标题同文，跳过烧录（台词稿仍保留）。")
+
+            if subs_mode == "burn":
+                if not has_ass_filter():
+                    warn("当前 ffmpeg 不带 libass（ass 滤镜），无法烧录特效字幕，退回 sidecar 字幕。")
+                    dim("  处理：换用带 libass 的 ffmpeg，或显式加 --subs sidecar 跳过烧录。")
+                elif not ass_cues:
+                    dim("  所有字幕都与画面大标题同文，本次不烧录字幕。")
+                else:
+                    ass_path = out_path.parent / (sub_base + ".ass")
+                    ass_path.write_text(to_ass(ass_cues), encoding="utf-8")
+                    burn_subs = True
+                    info(f"[节点4] 特效字幕：关键词高亮 / 弹跳缩放 → {rel(ass_path)}")
+                    dim("  已烧录进画面；上传平台时不要再挂载同名 .srt，否则会重叠成双份字幕。")
+            else:
+                dim("  --subs sidecar：画面保持干净，字幕只以 srt/vtt 外挂。")
+        else:
+            dim("  未取到逐句时间轴（edge-tts 未输出字幕），跳过 srt/vtt。")
+
+    # ---- 拼接配音轨 ----
+    voice_mp3 = audio_dir / "voice.mp3"
+    parts = []
+    labels = []
+    for i, v in enumerate(voice_files):
+        ms = max(0, round(v["start"] * 1000))
+        parts.append(f"[{i}:a]adelay={ms}:all=1[a{i}]")
+        labels.append(f"[a{i}]")
+    parts.append(f"{''.join(labels)}amix=inputs={len(voice_files)}:duration=longest:normalize=0[voicemix]")
+    parts.append("[voicemix]apad[voice]")
+    info("[节点4] 按时间轴拼接配音…")
+    cmd = [ffmpeg_bin(), "-y"]
+    for v in voice_files:
+        cmd += ["-i", v["file"]]
+    cmd += ["-filter_complex", ";".join(parts), "-map", "[voice]", "-t", f"{video_duration:.3f}", str(voice_mp3)]
+    run_cmd(cmd)
+
+    # ---- BGM 选曲 ----
+    bgm = None
+    if arg_bool(args, "no-bgm"):
+        dim("  --no-bgm：本片不混 BGM。")
+    else:
+        bgm_arg = arg_str(args, "bgm")
+        style_arg = arg_str(args, "bgm-style")
+        jamendo_id = get_client_id(arg_str(args, "jamendo-client-id"))
+        want_jamendo = isinstance(meta.get("bgm"), dict) and not bgm_arg and not arg_bool(args, "no-jamendo")
+        if want_jamendo:
+            if not jamendo_id:
+                warn("脚本有 meta.bgm 推荐，但未设置 JAMENDO_CLIENT_ID，回退本地 BGM。")
+                dim("  免费申请：https://devportal.jamendo.com/（环境变量 JAMENDO_CLIENT_ID）")
+            else:
+                info(f"[节点4] Jamendo 自动选曲，参考：{reference_text(meta.get('bgm'))}")
+                try:
+                    bgm = resolve_jamendo_bgm(
+                        script, jamendo_id, video_duration,
+                        cwd=os.getcwd(),
+                        limit=int(arg_num(args, "jamendo-limit", 12)),
+                        on_log=lambda m: dim(f"  {m}"),
+                    )
+                except Exception as exc:
+                    warn(f"Jamendo 选曲失败，回退本地 BGM：{exc}")
+                    bgm = None
+                if bgm:
+                    info(f"[节点4] BGM：{bgm['track']['name']} — {bgm['track']['artist']}（Jamendo / {bgm['license']['label']}）")
+                    dim(f"  参考片段：{bgm['reference']['text']}")
+                    dim(f"  实际音轨：{rel(bgm['path'])}，从 {format_clock(bgm['startOffset'])} 切入")
+                    dim(f"  署名：{bgm['attribution']}")
+                    if bgm["license"].get("nd"):
+                        warn("该曲为 ND（禁止演绎）授权；把音乐与画面同步可能被认定为演绎，发布前请自行确认。")
+                    if not bgm["track"].get("instrumental"):
+                        warn("该曲未标注为器乐，可能含人声，建议试听后决定是否保留。")
+
+        if not bgm:
+            bgm = resolve_bgm(script, bgm_arg, style_arg)
+            if bgm["source"] == "cli" and not bgm["exists"]:
+                warn(f"指定的 BGM 不存在：{rel(bgm['path'])}，本次仅使用配音。")
+                bgm = None
+            elif not bgm.get("exists") or not bgm.get("path"):
+                warn(f"未找到 BGM（风格 {bgm['style']} / {style_label(bgm['style'])}），本次仅使用配音。")
+                dim(f"  放置方式：audio/bgm/<style>.mp3 或 audio/bgm.mp3；可用风格：{' / '.join(style_names())}")
+                bgm = None
+            else:
+                if not is_known_style(bgm["style"]):
+                    warn(f"BGM 风格「{bgm['style']}」不在推荐列表里，已按文件名关键词匹配。")
+                src_label = {
+                    "style-exact": "按风格精确匹配",
+                    "style-keyword": "按风格关键词匹配",
+                    "generic": "通用 bgm.mp3",
+                    "cli": "命令行指定",
+                    "only-file": "目录内唯一音频",
+                }.get(bgm["source"], bgm["source"])
+                info(f"[节点4] BGM：{rel(bgm['path'])}（{style_label(bgm['style'])} / {src_label}）")
+
+    has_bgm = bool(bgm and bgm.get("exists") and bgm.get("path"))
+
+    filters = []
+    video_map = "0:v"
+    video_encode = ["-c:v", "copy"]
+    if burn_subs and ass_path:
+        filters.append(f"[0:v]ass='{escape_filter_path(ass_path)}'[v]")
+        video_map = "[v]"
+        video_encode = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium"]
+
+    use_duck = has_bgm and not no_duck
+    if use_duck:
+        filters.append(f"[1:a]{VOICE_FMT},volume=1.0,asplit=2[voice][sc]")
+    else:
+        filters.append(f"[1:a]{VOICE_FMT},volume=1.0[voice]")
+
+    bgm_input = []
+    if has_bgm:
+        offset = float(bgm.get("startOffset") or 0)
+        if offset > 0:
+            bgm_input += ["-ss", f"{offset:.3f}"]
+        bgm_input += ["-stream_loop", "-1", "-i", str(bgm["path"])]
+        fade_in = min(0.8, video_duration / 3)
+        fade_out = min(1.2, video_duration / 3)
+        fade_out_at = max(0, video_duration - fade_out)
+        filters.append(
+            f"[2:a]atrim=0:{video_duration:.3f},asetpts=PTS-STARTPTS,"
+            f"afade=t=in:st=0:d={fade_in:.3f},"
+            f"afade=t=out:st={fade_out_at:.3f}:d={fade_out:.3f},"
+            f"volume={bgm_volume},{VOICE_FMT}[bgm]"
+        )
+        if no_duck:
+            filters.append("[voice][bgm]amix=inputs=2:duration=longest:normalize=0[a]")
+        else:
+            filters.append("[bgm][sc]sidechaincompress=threshold=0.05:ratio=8:attack=20:release=300[bgmduck]")
+            filters.append("[voice][bgmduck]amix=inputs=2:duration=longest:normalize=0[a]")
+    else:
+        filters.append("[voice]anull[a]")
+
+    info(f"[节点4] 与视频合成{'（含 BGM 自动闪避）' if has_bgm else ''}…")
+    cmd = [ffmpeg_bin(), "-y", "-i", str(video_path), "-i", str(voice_mp3)] + bgm_input + [
+        "-filter_complex", ";".join(filters),
+        "-map", video_map, "-map", "[a]",
+    ] + video_encode + [
+        "-c:a", "aac", "-b:a", "192k",
+        "-t", f"{video_duration:.3f}", "-movflags", "+faststart",
+        str(out_path),
+    ]
+    run_cmd(cmd)
+
+    final_duration = probe_duration(out_path)
+    manifest_path = Path(re.sub(r"\.[^.\\/]+$", "", str(out_path)) + ".audio.json")
+    manifest = {
+        "version": 2,
+        "generatedBy": "main.py",
+        "title": meta.get("title") or base,
+        "script": rel(script_path),
+        "video": rel(video_path),
+        "out": rel(out_path),
+        "duration": video_duration,
+        "overflow": overflow,
+        "tts": {"voice": voice, "rate": rate, "textNormalized": normalize_text},
+        "bgm": {
+            "file": rel(bgm["path"]),
+            "style": bgm.get("style"),
+            "label": style_label(bgm.get("style")),
+            "source": bgm.get("source"),
+            "ducking": not no_duck,
+            "volume": float(bgm_volume),
+            "startOffset": float(bgm.get("startOffset") or 0),
+            "reference": bgm.get("reference") or meta.get("bgm"),
+            "track": bgm.get("track"),
+            "license": bgm.get("license"),
+            "attribution": bgm.get("attribution"),
+        } if has_bgm else None,
+        "scenes": [
+            {
+                "index": v["index"],
+                "id": v["sceneId"],
+                "start": v["start"],
+                "end": v["sceneEnd"],
+                "voiceDuration": v["duration"],
+                "textNormalized": v["textNormalized"],
+                "narration": v["narration"],
+                "originalNarration": v["narrationOriginal"],
+            }
+            for v in voice_files
+        ],
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    print()
+    ok(
+        f"[节点4] 完成 → {out_path.resolve()}（"
+        f"{f'{final_duration:.2f}s' if final_duration else '?'}，{human_size(out_path.stat().st_size)}）"
+    )
+    dim(f"  标题：{meta.get('title') or base}")
+    dim(f"  配音轨：{rel(voice_mp3)}")
+    dim(f"  混音清单：{rel(manifest_path)}")
+    if sub_cues:
+        srt_rel = rel(out_path.parent / (out_path.stem + ".srt"))
+        if burn_subs:
+            dim(f"  字幕：已烧录 {len(ass_cues)} 条特效字幕到画面；同名 srt/vtt 仅作台词稿（{srt_rel}）")
+        else:
+            dim(f"  字幕：{srt_rel}（{len(sub_cues)} 条，未烧录）")
+    if final_duration and abs(final_duration - video_duration) > 0.5:
+        warn(f"成片时长 {final_duration:.2f}s 与无声视频 {video_duration:.2f}s 不一致，请检查。")
+    return str(out_path), str(manifest_path)
+
+
+# ---------------------------------------------------------------------------
+# 画面像素分析（等价 lib/layout.js）
+# ---------------------------------------------------------------------------
+SAMPLE_W, SAMPLE_H = 640, 360
+BAND = 3
+STEP_THRESHOLD = 30
+MIN_STEPS = 2
+FRAME_DIFF_THRESHOLD = 0.5
+STATIC_LIMIT = 4
+FOCUS_MIN_SPAN = 0.30
+COMPOSITION_LUMA = 32
+COMPOSITION_CHROMA = 40
+COMPOSITION_ACTIVE_MIN = 0.005
+GRID_COLS, GRID_ROWS = 16, 9
+CELL_ACTIVE_RATIO = 0.08
+
+
+def sample_frames(video_path, width=SAMPLE_W, height=SAMPLE_H, fps=1, max_frames=180, crop_bottom=0):
+    """用 ffmpeg 按 fps 抽帧，返回 (frames, width, height)；frame 是 rgb24 字节或 ndarray。"""
+    crop_frac = max(0.0, min(0.6, float(crop_bottom or 0)))
+    out_h = max(1, round(height * (1 - crop_frac)))
+    vf = f"fps={fps},scale={width}:{height}"
+    if crop_frac > 0:
+        vf += f",crop={width}:{out_h}:0:0"
+    cmd = [
+        ffmpeg_bin(), "-v", "error", "-i", str(video_path),
+        "-vf", vf, "-frames:v", str(max_frames),
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg 抽帧失败：" + (proc.stderr or b"").decode("utf-8", "replace")[-500:]
+        )
+    buf = proc.stdout
+    frame_size = width * out_h * 3
+    frames = []
+    for off in range(0, len(buf) - frame_size + 1, frame_size):
+        raw = buf[off:off + frame_size]
+        try:
+            import numpy as np
+            frames.append(np.frombuffer(raw, dtype=np.uint8).reshape((out_h, width, 3)))
+        except ImportError:
+            frames.append(raw)
+    return frames, width, out_h
+
+
+def _luma_array(rgb):
+    try:
+        import numpy as np
+        arr = rgb.astype(np.float32) if hasattr(rgb, "astype") else None
+        if arr is not None:
+            return 0.2126 * arr[:, :, 0] + 0.7152 * arr[:, :, 1] + 0.0722 * arr[:, :, 2]
+    except ImportError:
+        pass
+    return None
+
+
+def _sharp_steps(lums):
+    steps = 0
+    prev = None
+    for value in lums:
+        value = float(value)
+        if prev is not None and abs(value - prev) >= STEP_THRESHOLD:
+            steps += 1
+        prev = value
+    return steps
+
+
+def _edge_bands_pure(rgb, w, h):
+    def at(x, y):
+        o = (y * w + x) * 3
+        return 0.2126 * rgb[o] + 0.7152 * rgb[o + 1] + 0.0722 * rgb[o + 2]
+
+    def col_avg(x, ys):
+        return sum(at(x, y) for y in ys) / len(ys)
+
+    def row_avg(y, xs):
+        return sum(at(x, y) for x in xs) / len(xs)
+
+    left_ys = list(range(BAND))
+    right_ys = [h - 1 - i for i in range(BAND)]
+    top_xs = list(range(BAND))
+    bottom_xs = [w - 1 - i for i in range(BAND)]
+    return {
+        "left": [col_avg(x, left_ys) for x in range(w)],
+        "right": [col_avg(x, right_ys) for x in range(w)],
+        "top": [row_avg(y, top_xs) for y in range(h)],
+        "bottom": [row_avg(y, bottom_xs) for y in range(h)],
+    }
+
+
+def _edge_bands(rgb, w, h):
+    lum = _luma_array(rgb)
+    if lum is None:
+        return _edge_bands_pure(rgb, w, h)
+    try:
+        import numpy as np
+        return {
+            "left": lum[:, :BAND].mean(axis=1),
+            "right": lum[:, -BAND:].mean(axis=1),
+            "top": lum[:BAND, :].mean(axis=0),
+            "bottom": lum[-BAND:, :].mean(axis=0),
+        }
+    except Exception:
+        return _edge_bands_pure(rgb, w, h)
+
+
+def analyze_clipping(video_path, fps=1):
+    frames, width, height = sample_frames(video_path, fps=fps)
+    clipped = []
+    for idx, frame in enumerate(frames):
+        bands = _edge_bands(frame, width, height)
+        hit = [edge for edge in ("left", "right", "top", "bottom") if _sharp_steps(bands[edge]) >= MIN_STEPS]
+        if hit:
+            clipped.append({"time": idx / fps, "edges": hit})
+    return {"sampled": len(frames), "clipped": clipped}
+
+
+def _mean_abs_diff(a, b):
+    try:
+        import numpy as np
+        return float(np.mean(np.abs(a - b)))
+    except ImportError:
+        n = min(len(a), len(b))
+        return sum(abs(a[i] - b[i]) for i in range(n)) / n if n else 0.0
+
+
+def analyze_pacing(video_path, fps=4, width=320, height=180, max_frames=720,
+                   threshold=FRAME_DIFF_THRESHOLD, static_limit=STATIC_LIMIT,
+                   hook_window=3, crop_bottom=0):
+    frames, _, _ = sample_frames(video_path, width, height, fps, max_frames, crop_bottom)
+    if len(frames) < 2:
+        return {
+            "sampled": len(frames), "fps": fps, "threshold": threshold, "duration": 0,
+            "staticSpans": [], "overLimit": [], "longestStatic": None,
+            "hookChanges": 0, "activeRatio": 0, "firstFrameLuma": None, "maxDiff": 0,
+        }
+    lumas = []
+    for f in frames:
+        lum = _luma_array(f)
+        if lum is None:
+            lum = [
+                0.2126 * f[i] + 0.7152 * f[i + 1] + 0.0722 * f[i + 2]
+                for i in range(0, len(f) - 2, 3)
+            ]
+        lumas.append(lum)
+
+    diffs = [None] * len(lumas)
+    active = 0
+    for i in range(1, len(lumas)):
+        d = _mean_abs_diff(lumas[i - 1], lumas[i])
+        diffs[i] = d
+        if d >= threshold:
+            active += 1
+
+    spans = []
+    run_start = None
+    for i in range(1, len(lumas)):
+        if diffs[i] < threshold:
+            if run_start is None:
+                run_start = i
+        elif run_start is not None:
+            spans.append({"start": run_start / fps, "end": i / fps, "duration": (i - run_start) / fps})
+            run_start = None
+    if run_start is not None:
+        spans.append({
+            "start": run_start / fps,
+            "end": len(lumas) / fps,
+            "duration": (len(lumas) - run_start) / fps,
+        })
+    spans.sort(key=lambda s: -s["duration"])
+
+    hook_samples = min(len(lumas), math.ceil(hook_window * fps))
+    hook_changes = sum(1 for d in diffs[1:hook_samples] if d is not None and d >= threshold)
+    first_luma = None
+    try:
+        import numpy as np
+        first_luma = float(np.mean(lumas[0]))
+    except Exception:
+        first_luma = sum(lumas[0]) / len(lumas[0]) if len(lumas[0]) else 0.0
+    numeric_diffs = [d for d in diffs if d is not None]
+    return {
+        "sampled": len(lumas),
+        "fps": fps,
+        "threshold": threshold,
+        "duration": len(lumas) / fps,
+        "activeRatio": active / max(1, len(lumas) - 1),
+        "staticSpans": [s for s in spans if s["duration"] >= 1],
+        "overLimit": [s for s in spans if s["duration"] > static_limit],
+        "longestStatic": spans[0] if spans else None,
+        "hookChanges": hook_changes,
+        "firstFrameLuma": first_luma,
+        "maxDiff": max(numeric_diffs) if numeric_diffs else 0,
+    }
+
+
+def _median(nums):
+    if not nums:
+        return 0
+    nums = sorted(nums)
+    mid = len(nums) // 2
+    return nums[mid] if len(nums) % 2 else (nums[mid - 1] + nums[mid]) / 2
+
+
+def analyze_composition(video_path, fps=1, width=320, height=180, max_frames=300, crop_bottom=0):
+    frames, w, h = sample_frames(video_path, width, height, fps, max_frames, crop_bottom)
+    cell_w = math.ceil(w / GRID_COLS)
+    cell_h = math.ceil(h / GRID_ROWS)
+    cell_min = max(1, math.ceil(cell_w * cell_h * CELL_ACTIVE_RATIO))
+
+    try:
+        import numpy as np
+        use_numpy = True
+    except ImportError:
+        use_numpy = False
+
+    results = []
+    for idx, frame in enumerate(frames):
+        if use_numpy:
+            arr = frame.astype(np.float32)
+            r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+            lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            chroma = np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b)
+            mask = (lum >= COMPOSITION_LUMA) | (chroma >= COMPOSITION_CHROMA)
+            active = int(mask.sum())
+            grid = np.zeros((GRID_ROWS, GRID_COLS), dtype=np.int64)
+            ys, xs = np.nonzero(mask)
+            cy = np.minimum(GRID_ROWS - 1, ys // cell_h)
+            cx = np.minimum(GRID_COLS - 1, xs // cell_w)
+            np.add.at(grid, (cy, cx), 1)
+        else:
+            grid = [[0] * GRID_COLS for _ in range(GRID_ROWS)]
+            active = 0
+            for y in range(h):
+                cyi = min(GRID_ROWS - 1, y // cell_h)
+                for x in range(w):
+                    o = (y * w + x) * 3
+                    rr, gg, bb = frame[o], frame[o + 1], frame[o + 2]
+                    l = 0.2126 * rr + 0.7152 * gg + 0.0722 * bb
+                    chroma = max(rr, gg, bb) - min(rr, gg, bb)
+                    if l >= COMPOSITION_LUMA or chroma >= COMPOSITION_CHROMA:
+                        active += 1
+                        grid[cyi][min(GRID_COLS - 1, x // cell_w)] += 1
+
+        min_cx, min_cy, max_cx, max_cy = GRID_COLS, GRID_ROWS, -1, -1
+        for gy in range(GRID_ROWS):
+            for gx in range(GRID_COLS):
+                count = int(grid[gy][gx]) if not use_numpy else int(grid[gy, gx])
+                if count < cell_min:
+                    continue
+                min_cx = min(min_cx, gx)
+                max_cx = max(max_cx, gx)
+                min_cy = min(min_cy, gy)
+                max_cy = max(max_cy, gy)
+        bbox_w = min(w, (max_cx - min_cx + 1) * cell_w) if max_cx >= min_cx else 0
+        bbox_h = min(h, (max_cy - min_cy + 1) * cell_h) if max_cy >= min_cy else 0
+        active_ratio = active / (w * h)
+        results.append({
+            "time": idx / fps,
+            "activeRatio": active_ratio,
+            "bboxW": bbox_w,
+            "bboxH": bbox_h,
+            "focusSpan": max(bbox_w / w, bbox_h / h),
+        })
+
+    valid = [f for f in results if f["activeRatio"] >= COMPOSITION_ACTIVE_MIN]
+    spans = [f["focusSpan"] for f in valid]
+    low_focus = sum(1 for f in valid if f["focusSpan"] < FOCUS_MIN_SPAN)
+    return {
+        "sampled": len(results),
+        "valid": len(valid),
+        "fps": fps,
+        "focusMinSpan": FOCUS_MIN_SPAN,
+        "medianFocusSpan": _median(spans),
+        "medianActiveRatio": _median([f["activeRatio"] for f in valid]),
+        "lowFocusFrames": low_focus,
+        "lowFocusRatio": low_focus / len(valid) if valid else 0,
+        "frames": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 节点5：成片质检（等价 qa.js）
+# ---------------------------------------------------------------------------
+DURATION_TOLERANCE = 0.5
+
+
+def pick_analysis_video(fallback_video, duration, explicit="", explicit_silent=""):
+    if explicit:
+        return {"video": Path(explicit).resolve(), "cropBottom": 0, "label": "命令行指定"}
+    candidates = []
+    if explicit_silent:
+        candidates.append({"file": Path(explicit_silent).resolve(), "label": "命令行指定无声视频"})
+    candidates.append({
+        "file": Path(re.sub(r"\.mp4$", "_silent.mp4", str(fallback_video), flags=re.I)),
+        "label": "同名无声视频",
+    })
+    candidates.append({"file": Path("output/video_silent.mp4").resolve(), "label": "无声视频"})
+    for c in candidates:
+        if not c["file"].exists():
+            continue
+        silent_dur = probe_duration(c["file"])
+        if silent_dur and duration is not None and abs(silent_dur - duration) <= DURATION_TOLERANCE:
+            return {"video": c["file"], "cropBottom": 0, "label": c["label"]}
+    return {"video": Path(fallback_video), "cropBottom": 0.18, "label": "成片（裁掉底部字幕区）"}
+
+
+def qa_run(args):
+    """节点5：质检。返回 (problems, hard_fail)。"""
+    script_path = Path(arg_str(args, "script") or "script.yaml")
+    video_path = Path(arg_str(args, "video") or "output/final.mp4")
+
+    problems = []
+    hard_fail = [False]
+
+    def W(m):
+        warn(m)
+        problems.append(m)
+
+    def P(m):
+        ok(m)
+
+    def F(m):
+        fail(m)
+        problems.append(m)
+        hard_fail[0] = True
+
+    info(f"[节点5] 质检对象：{rel(video_path)}")
+    print()
+    if not video_path.exists():
+        F(f"成片不存在：{video_path.resolve()}")
+        return problems, True
+
+    meta = probe_json(video_path)
+    if not meta:
+        F("ffprobe 无法解析该文件，可能未生成完整。")
+        return problems, True
+
+    streams = meta.get("streams") or []
+    video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    duration = None
+    try:
+        duration = float((meta.get("format") or {}).get("duration"))
+    except (TypeError, ValueError):
+        duration = None
+
+    if video_stream:
+        P(f"视频流：{video_stream.get('codec_name')} {video_stream.get('width')}x{video_stream.get('height')}")
+        if video_stream.get("codec_name") != "h264":
+            W(f"视频编码为 {video_stream.get('codec_name')}，脚本约定为 H.264。")
+    else:
+        F("没有视频流。")
+    if audio_stream:
+        P(f"音频流：{audio_stream.get('codec_name')} {audio_stream.get('sample_rate')}Hz {audio_stream.get('channels')}声道")
+        if audio_stream.get("codec_name") != "aac":
+            W(f"音频编码为 {audio_stream.get('codec_name')}，脚本约定为 AAC。")
+    else:
+        F("没有音频流——配音/BGM 未成功写入。")
+
+    if video_stream and video_stream.get("r_frame_rate"):
+        rate_text = str(video_stream["r_frame_rate"])
+        try:
+            num, den = [float(x) for x in rate_text.split("/")]
+            fps = num / den if den else num
+            if abs(fps - 30) < 0.1:
+                P(f"帧率：{fps:g}fps")
+            else:
+                W(f"帧率：{fps:g}fps，与约定的 30fps 不一致。")
+        except Exception:
+            pass
+
+    script = read_yaml(script_path) if script_path.exists() else None
+    declared = None
+    if isinstance(script, dict) and isinstance(script.get("meta"), dict):
+        declared = script["meta"].get("duration")
+    if declared is not None and duration is not None:
+        diff = abs(duration - float(declared))
+        if diff <= DURATION_TOLERANCE:
+            P(f"时长：{duration:.2f}s（脚本声明 {declared}s，误差 {diff:.2f}s）")
+        else:
+            F(f"时长：{duration:.2f}s，与脚本声明的 {declared}s 相差 {diff:.2f}s（容差 {DURATION_TOLERANCE}s）。")
+    elif duration is not None:
+        P(f"时长：{duration:.2f}s（脚本未声明 meta.duration，跳过比对）")
+        dim("  提示：在脚本里补上 meta.duration 可自动校验时长。")
+
+    size = video_path.stat().st_size
+    P(f"体积：{human_size(size)}")
+    if size < 100 * 1024:
+        F("文件过小，疑似产出失败。")
+
+    if audio_stream:
+        try:
+            proc = subprocess.run(
+                [ffmpeg_bin(), "-hide_banner", "-i", str(video_path), "-af", "volumedetect", "-f", "null", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            m = re.search(r"max_volume:\s*(-?[\d.]+) dB", proc.stdout or "")
+            if m:
+                max_vol = float(m.group(1))
+                if max_vol < -60:
+                    F(f"音轨几乎全静音（max_volume {max_vol}dB）。")
+                elif max_vol < -20:
+                    W(f"音轨偏小（max_volume {max_vol}dB），请确认配音音量。")
+                else:
+                    P(f"音轨电平正常（max_volume {max_vol}dB）")
+        except Exception:
+            dim("  跳过音量检测（volumedetect 不可用）。")
+
+    print()
+    info("[节点5] 混音清单检查：")
+    manifest_path = Path(re.sub(r"\.[^.\\/]+$", "", str(video_path)) + ".audio.json")
+    manifest = None
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            P(f"  {rel(manifest_path)}")
+        except Exception:
+            W(f"  混音清单无法解析：{rel(manifest_path)}")
+            manifest = None
+    if not manifest:
+        dim("  未找到混音清单（旧版节点4 产物或手动混音），跳过 BGM / 覆盖率细查。")
+    else:
+        m_bgm = manifest.get("bgm")
+        if isinstance(m_bgm, dict) and m_bgm.get("file"):
+            source = "Jamendo 授权曲库" if m_bgm.get("source") == "jamendo" else (m_bgm.get("source") or "本地")
+            P(
+                f"  BGM：{m_bgm['file']}（{m_bgm.get('label') or m_bgm.get('style')} / {source}，"
+                f"侧链闪避{'开启' if m_bgm.get('ducking') else '关闭'}，音量 {m_bgm.get('volume')}）"
+            )
+            if not m_bgm.get("ducking"):
+                W("  BGM 未开启侧链闪避，人声较密时可能被音乐盖住。")
+            if isinstance(m_bgm.get("track"), dict):
+                track = m_bgm["track"]
+                lic = m_bgm.get("license") if isinstance(m_bgm.get("license"), dict) else {}
+                dim(f"    曲目：{track.get('name')} — {track.get('artist')}（{lic.get('label') or '授权未知'}）")
+                if lic.get("commercial") is False:
+                    W("  该 BGM 为非商业（NC）授权，投稿/变现前需更换或另行取得授权。")
+                if lic.get("attributionRequired"):
+                    dim("    发布时请按混音清单里的 attribution 字段署名。")
+            if isinstance(m_bgm.get("reference"), dict):
+                dim(f"    参考推荐：{m_bgm['reference'].get('text') or reference_text(m_bgm['reference'])}")
+        else:
+            W("  未使用 BGM：成片只有人声。配置 JAMENDO_CLIENT_ID 或放置 audio/bgm/<style>.mp3。")
+        if isinstance(manifest.get("tts"), dict):
+            tts = manifest["tts"]
+            P(f"  配音：{tts.get('voice')}，语速 {tts.get('rate')}，文本规范化{'开启' if tts.get('textNormalized') else '关闭'}")
+        if manifest.get("overflow"):
+            W("  节点4 记录到旁白溢出场景窗口，请结合下方旁白时间轴确认。")
+
+    if arg_bool(args, "blackdetect"):
+        print()
+        info("[节点5] 黑帧检测中（完整解码一遍，稍慢）…")
+        try:
+            proc = subprocess.run(
+                [ffmpeg_bin(), "-hide_banner", "-i", str(video_path),
+                 "-vf", "blackdetect=d=0.5:pix_th=0.10", "-an", "-f", "null", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            hits = re.findall(r"black_start:([\d.]+) black_end:([\d.]+)", proc.stdout or "")
+            if not hits:
+                P("未检测到持续 0.5s 以上的黑帧。")
+            else:
+                for start, end in hits:
+                    W(f"黑帧：{float(start):.2f}s ~ {float(end):.2f}s")
+        except Exception:
+            dim("  跳过黑帧检测。")
+
+    if isinstance(script, dict) and isinstance(script.get("scenes"), list):
+        print()
+        info("[节点5] 旁白时间轴与覆盖率检查：")
+        any_voice = False
+        manifest_scenes = manifest.get("scenes") if isinstance(manifest, dict) and isinstance(manifest.get("scenes"), list) else None
+        entries = []
+        if manifest_scenes:
+            for v in manifest_scenes:
+                end_value = v.get("end")
+                end_num = float(end_value) if isinstance(end_value, (int, float)) and math.isfinite(float(end_value)) else None
+                entries.append({
+                    "id": v.get("id") or str(v.get("index")),
+                    "start": float(v.get("start") or 0),
+                    "end": end_num,
+                    "voiceDuration": float(v.get("voiceDuration")) if v.get("voiceDuration") is not None else None,
+                })
+        else:
+            for i, scene in enumerate(script["scenes"]):
+                if not isinstance(scene, dict) or not str(scene.get("narration") or "").strip():
+                    continue
+                tag = f"{i:02d}"
+                f = Path("audio") / f"voice_{tag}.mp3"
+                if not f.exists():
+                    continue
+                end_raw = scene.get("end")
+                end_num = float(end_raw) if isinstance(end_raw, (int, float)) and math.isfinite(float(end_raw)) else None
+                start_raw = scene.get("start")
+                start_num = float(start_raw) if isinstance(start_raw, (int, float)) and math.isfinite(float(start_raw)) else 0.0
+                entries.append({
+                    "id": scene.get("id") or str(i),
+                    "start": start_num,
+                    "end": end_num,
+                    "voiceDuration": probe_duration(f),
+                })
+        if manifest_scenes:
+            dim("  数据来源：节点4 混音清单（.audio.json）")
+        for v in entries:
+            d = v["voiceDuration"]
+            if d is None or not math.isfinite(d):
+                continue
+            any_voice = True
+            voice_end = v["start"] + d
+            label = f"{v['id']}：旁白 {v['start']:.1f}s→{voice_end:.1f}s"
+            if v["end"] is not None and voice_end > v["end"] + 0.3:
+                W(f"  {label}，超出场景结束 {v['end']:g}s（溢出 {voice_end - v['end']:.1f}s）")
+            else:
+                P(f"  {label}（场景 {v['start']:g}s→{v['end'] if v['end'] is not None else '?'}s）")
+            if v["end"] is not None and v["end"] > v["start"]:
+                coverage = d / (v["end"] - v["start"])
+                if coverage < 0.75:
+                    W(f"    {v['id']}：旁白覆盖率 {coverage * 100:.0f}%，低于 75%，场景后半段容易空。")
+        if not any_voice:
+            dim("  未找到分段配音或混音清单，跳过该项。")
+
+    print()
+    info("[节点5] 画面版式检查（内容是否被边缘裁切）：")
+    try:
+        layout = analyze_clipping(video_path)
+        if not layout["clipped"]:
+            P(f"  {layout['sampled']} 个采样帧均未发现内容被裁切")
+        else:
+            pct = layout["clipped"].__len__() / layout["sampled"] * 100 if layout["sampled"] else 0
+            first = "，".join(f"{c['time']:.0f}s({'/'.join(c['edges'])})" for c in layout["clipped"][:5])
+            msg = f"  {len(layout['clipped'])}/{layout['sampled']} 个采样帧（{pct:.0f}%）有内容被边缘裁切"
+            if pct >= 30:
+                F(msg)
+            else:
+                W(msg)
+            dim(f"    例：{first}")
+            dim("    常见原因：绘制坐标重复加了一次 W/2 或 H/2，内容整体被推到右下角。")
+            dim("    检查 HTML 的绘制函数——世界坐标原点应当在画面中心。")
+    except Exception as exc:
+        dim(f"  跳过版式检查（{str(exc).splitlines()[0]}）")
+
+    if not arg_bool(args, "no-pacing"):
+        print()
+        info("[节点5] 画面节奏检查（静止超过 4 秒 / 前 3 秒视觉事件）：")
+        try:
+            picked = pick_analysis_video(video_path, duration, arg_str(args, "pacing-video"), arg_str(args, "silent"))
+            pacing = analyze_pacing(picked["video"], crop_bottom=picked["cropBottom"])
+            dim(f"  分析对象：{rel(picked['video'])}（{picked['label']}），4fps 抽帧")
+            if pacing["sampled"] < 4:
+                dim("  采样帧太少，跳过节奏判断。")
+            else:
+                P(f"  画面变化率 {pacing['activeRatio'] * 100:.0f}%（{pacing['sampled']} 个采样帧）")
+                if pacing["hookChanges"] < 2:
+                    W(f"  前 3 秒只有 {pacing['hookChanges']} 次可感知变化，至少需要 2 次。")
+                else:
+                    P(f"  前 3 秒有 {pacing['hookChanges']} 次可感知变化")
+                if pacing["firstFrameLuma"] is not None and pacing["firstFrameLuma"] < 4:
+                    W(f"  首帧平均亮度 {pacing['firstFrameLuma']:.1f}，开场接近纯黑。")
+                if not pacing["overLimit"]:
+                    P("  没有超过 4 秒的静止区段")
+                else:
+                    for gap in pacing["overLimit"][:5]:
+                        W(f"  静止 {gap['duration']:.1f}s：{gap['start']:.1f}s → {gap['end']:.1f}s")
+                    if len(pacing["overLimit"]) > 5:
+                        dim(f"  另有 {len(pacing['overLimit']) - 5} 段静止未列出。")
+                    dim("  修法：给长驻留元素加自主运动（呼吸/漂移/脉冲），或在节点3 之前给脚本补视觉事件。")
+                if pacing["longestStatic"] and pacing["longestStatic"]["duration"] > 8:
+                    W(f"  最长静止 {pacing['longestStatic']['duration']:.1f}s，远超 4 秒上限，完播率会被拉低。")
+                if pacing["activeRatio"] < 0.2:
+                    W("  全片变化率低于 20%，成片接近“带配音的静态 PPT”。")
+        except Exception as exc:
+            dim(f"  跳过节奏检查（{str(exc).splitlines()[0]}）")
+
+    if not arg_bool(args, "no-composition"):
+        print()
+        info("[节点5] 构图占屏检查（主焦点外接框 ≥ 30% 视口）：")
+        try:
+            picked = pick_analysis_video(
+                video_path, duration,
+                arg_str(args, "composition-video") or arg_str(args, "pacing-video"),
+                arg_str(args, "silent"),
+            )
+            comp = analyze_composition(picked["video"], fps=1, crop_bottom=picked["cropBottom"])
+            dim(f"  分析对象：{rel(picked['video'])}（{picked['label']}），1fps 抽帧")
+            if comp["valid"] < 4:
+                dim("  有效采样帧太少（可能接近黑场），跳过构图判断。")
+            else:
+                med = round(comp["medianFocusSpan"] * 100)
+                if comp["medianFocusSpan"] < comp["focusMinSpan"]:
+                    W(f"  主体占屏中位 {med}%，低于 30%：主焦点太小，画面容易空。")
+                    dim("    修法：放大主图形/数字，或让母题占据画面中心 40–65%。")
+                else:
+                    P(f"  主体占屏中位 {med}%（阈值 30%）")
+                if comp["lowFocusRatio"] > 0.4:
+                    W(f"  {round(comp['lowFocusRatio'] * 100)}% 的采样帧主体占屏 <30%，存在系统性“小画面”问题。")
+                else:
+                    P(f"  主体占屏低于 30% 的帧：{round(comp['lowFocusRatio'] * 100)}%")
+                if comp["medianActiveRatio"] < 0.02:
+                    W(f"  前景像素中位占比 {comp['medianActiveRatio'] * 100:.1f}%，画面可能大面积死黑。")
+                dim(f"  有效帧 {comp['valid']}/{comp['sampled']}；前景 = 亮度 ≥32 或色度 ≥40 的像素。")
+        except Exception as exc:
+            dim(f"  跳过构图检查（{str(exc).splitlines()[0]}）")
+
+    print()
+    info("[节点5] 特效字幕检查：")
+    ass_path = Path(re.sub(r"\.[^.\\/]+$", "", str(video_path)) + ".ass")
+    if ass_path.exists():
+        ass = ass_path.read_text(encoding="utf-8", errors="replace")
+        dialogues = len(re.findall(r"^Dialogue:", ass, re.M))
+        highlights = len(re.findall(r"\\c&H(?!FFFFFF)[0-9A-F]{6}&", ass))
+        if dialogues > 0:
+            P(f"  {rel(ass_path)}：{dialogues} 条字幕，{highlights} 处关键词高亮")
+        else:
+            W("  ASS 文件存在，但没有任何 Dialogue 事件。")
+    else:
+        dim("  未找到同名 .ass（可能用了 --subs sidecar / --no-subs，或 ffmpeg 不支持 libass）。")
+
+    print()
+    if hard_fail[0]:
+        fail(f"[节点5] 质检未通过：存在 {len(problems)} 项问题，需修复后重跑。")
+    elif problems:
+        warn(f"[节点5] 通过，但有 {len(problems)} 项提醒，建议人工确认。")
+    else:
+        ok("[节点5] 质检全部通过 ✓")
+    return problems, hard_fail[0]
+
+
+# ---------------------------------------------------------------------------
+# 节点0：环境检测与搭建（等价 setup.js，Python 版）
+# ---------------------------------------------------------------------------
+def _module_available(name):
+    import importlib.util
+    return importlib.util.find_spec(name) is not None
+
+
+def setup_check_and_install(args):
+    auto = arg_bool(args, "auto")
+    check_only = arg_bool(args, "check")
+    results = {}
+
+    print(f"\n{_C['cyan']}=== 节点0：环境检测（Python 版） ==={_C['reset']}\n")
+
+    def line(state, name, detail=""):
+        mark = f"{_C['green']}✓{_C['reset']}" if state is True else (f"{_C['yellow']}!{_C['reset']}" if state == "warn" else f"{_C['red']}✗{_C['reset']}")
+        print(f"  {mark} {name:<30} {detail}")
+
+    py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    py_ok = sys.version_info >= (3, 9)
+    line(py_ok, "Python", f"{py_version}{'' if py_ok else '（需要 3.9+）'}")
+    results["python"] = py_ok
+
+    ff_code, ff_out = try_capture([ffmpeg_bin(), "-version"], timeout=20)
+    results["ffmpeg"] = ff_code == 0
+    line(ff_code == 0, "ffmpeg", (ff_out.splitlines()[0][:60] if ff_out else "") if ff_code == 0 else "未安装（见下方指引）")
+    fp_code, _ = try_capture([ffprobe_bin(), "-version"], timeout=20)
+    results["ffprobe"] = fp_code == 0
+    line(fp_code == 0, "ffprobe", "" if fp_code == 0 else "未安装（随 ffmpeg 一起分发）")
+
+    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    results["deepseek"] = bool(key)
+    line(bool(key), "DEEPSEEK_API_KEY", f"已设置（{len(key)} 字符）" if key else "未设置（节点1、节点2 必需）")
+
+    tts = resolve_tts()
+    results["edge_tts"] = bool(tts)
+    line(bool(tts), "edge-tts", f"{tts['label']}（来源：{tts['source']}）" if tts else "未找到，需 py -3 -m pip install --upgrade edge-tts")
+
+    yaml_ok = _module_available("yaml")
+    results["pyyaml"] = yaml_ok
+    line(yaml_ok, "PyYAML（Python）", "" if yaml_ok else "未安装：py -3 -m pip install pyyaml")
+
+    pw_ok = _module_available("playwright")
+    results["playwright"] = pw_ok
+    line(pw_ok, "playwright（Python）", "" if pw_ok else "未安装：py -3 -m pip install playwright")
+
+    chromium_exe = _find_chromium_executable()
+    results["chromium"] = bool(chromium_exe)
+    line(bool(chromium_exe), "chromium", os.path.basename(chromium_exe) if chromium_exe else "未下载：py -3 -m playwright install chromium")
+
+    numpy_ok = _module_available("numpy")
+    results["numpy"] = numpy_ok
+    line("warn" if not numpy_ok else True, "numpy（可选，像素分析加速）", "" if numpy_ok else "未安装；仍可运行，但质检会慢很多")
+
+    print()
+    if check_only:
+        missing = [k for k, v in results.items() if not v and k != "numpy"]
+        if not missing:
+            ok("环境完备，可以开始生产。")
+            return 0
+        warn(f"缺失项：{'、'.join(missing)}")
+        dim("  修复：py -3 main.py setup --auto")
+        return 1
+
+    def ask(msg):
+        if auto:
+            print(f"  {_C['dim']}自动确认：{msg}{_C['reset']}")
+            return True
+        try:
+            answer = input(f"  {msg} [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer.strip().lower() == "y"
+
+    print(f"{_C['cyan']}=== 环境搭建 ==={_C['reset']}\n")
+    did_anything = False
+
+    pip_packages = []
+    if not results["pyyaml"]:
+        pip_packages.append("pyyaml")
+    if not results["playwright"]:
+        pip_packages.append("playwright")
+    if not results["numpy"]:
+        pip_packages.append("numpy")
+    if pip_packages and ask(f"安装 Python 依赖（{', '.join(pip_packages)}）？"):
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade"] + pip_packages, check=True)
+            did_anything = True
+        except Exception:
+            fail(f"安装失败，请手动执行：py -3 -m pip install {' '.join(pip_packages)}")
+
+    if not results["chromium"] and ask("下载 Playwright Chromium（约 150MB，逐帧渲染必需）？"):
+        try:
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+            did_anything = True
+        except Exception:
+            fail("Chromium 下载失败，请手动执行：py -3 -m playwright install chromium")
+
+    if not results["edge_tts"]:
+        print(f"  {_C['dim']}提示：Windows 上 edge-tts.exe 常装在 Python\\Scripts 下且不在 PATH，")
+        print(f"  本程序会自动改用 \"py -3 -m edge_tts\" 调用，无需改 PATH。{_C['reset']}")
+        if ask("安装 edge-tts（py -3 -m pip install --upgrade edge-tts）？"):
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "edge-tts"], check=True)
+                did_anything = True
+            except Exception:
+                fail("安装失败，请手动执行：py -3 -m pip install --upgrade edge-tts")
+
+    if not results["ffmpeg"]:
+        print(f"\n{_C['yellow']}ffmpeg 未安装，请任选一种方式：{_C['reset']}")
+        print("  Windows: winget install Gyan.FFmpeg   或   choco install ffmpeg")
+        print("  macOS:   brew install ffmpeg")
+        print("  Ubuntu:  sudo apt install ffmpeg")
+
+    if not results["deepseek"]:
+        print(f"\n{_C['yellow']}DEEPSEEK_API_KEY 未设置，节点1、节点2 无法运行。{_C['reset']}")
+        print("  PowerShell（永久写入用户环境变量，重开终端生效）：")
+        print(f'    {_C["dim"]}[Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY","sk-xxxx","User"){_C["reset"]}')
+        print("  PowerShell（仅当前会话）：")
+        print(f'    {_C["dim"]}$env:DEEPSEEK_API_KEY = "sk-xxxx"{_C["reset"]}')
+        print("  Git Bash:")
+        print(f'    {_C["dim"]}export DEEPSEEK_API_KEY=sk-xxxx{_C["reset"]}')
+
+    print()
+    if did_anything:
+        ok("安装步骤已执行，建议重新运行 py -3 main.py setup --check 复核。")
+    else:
+        ok("环境检查完成。")
+    still_missing = [k for k, v in results.items() if not v and k != "numpy"]
+    if still_missing:
+        warn(f"仍需处理：{'、'.join(still_missing)}")
+    print()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI：单文件主控（等价 main.js + 各脚本入口）
+# ---------------------------------------------------------------------------
+USAGE = """用法：
+  py -3 main.py --topic "选题" [--duration 45]     一句话选题 → 脚本 → 成片
+  py -3 main.py --material 资料.txt [--index 1]    资料 → 知识点 → 脚本 → 成片
+  py -3 main.py --points points.md [--index 1]     现成知识点 → 脚本 → 成片
+  py -3 main.py --topics "领域"                     只生成 10 个候选选题
+  py -3 main.py --script script.yaml               已有脚本 → 成片
+
+子命令（也可以直接跑单节点）：
+  py -3 main.py node1   --topics/--topic/--extract/--book ...
+  py -3 main.py node2   --script script.yaml [--out index.html] [--theme midnight]
+  py -3 main.py render  --html index.html [--script script.yaml] [--clean]
+  py -3 main.py audio   --script script.yaml [--video output/x_silent.mp4]
+  py -3 main.py qa      --script script.yaml --video output/x.mp4
+  py -3 main.py setup   [--check | --auto]
+
+命名：默认 output/<meta.title>.mp4，无声视频/字幕/混音清单同名
+      [--name 自定义基名] [--unique 重名时加 _2 保留旧版] [--out-dir 目录]
+
+BGM：设置 JAMENDO_CLIENT_ID 后按脚本 meta.bgm 自动选曲下载；
+      [--no-jamendo] 关闭在线选曲，回退本地 audio/bgm/；
+      [--bgm 文件] 显式指定音轨。
+
+其它：[--html index.html] [--video output/x.mp4] [--force-node2] [--clean]
+      [--skip-node2] [--skip-node4] [--no-bgm] [--no-duck] [--rate +5%]
+      [--theme midnight] [--subs burn|sidecar|none] [--list-themes]
+      [--workflow] [--help]
+
+环境与工作流详情：py -3 main.py --workflow
+"""
+
+
+def copy_llm_args(args):
+    """把模型相关参数原样传给节点1/2。"""
+    out = {}
+    for key in ("model", "max-tokens", "temperature", "prompt-dir"):
+        if key in args:
+            out[key] = args[key]
+    return out
+
+
+def step(n, title):
+    print("\n" + "─" * 60)
+    info(f"节点{n}：{title}")
+    print("─" * 60)
+
+
+def run_pipeline(args):
+    t0 = time.time()
+    script = Path(arg_str(args, "script") or "script.yaml")
+    html = Path(arg_str(args, "html") or "index.html")
+    bgm_arg = arg_str(args, "bgm")
+    bgm = str(Path(bgm_arg).resolve()) if bgm_arg else ""
+    video_override = str(Path(arg_str(args, "video")).resolve()) if arg_str(args, "video") else ""
+    clean = arg_bool(args, "clean")
+    topic = arg_str(args, "topic")
+    material = arg_str(args, "material")
+    points = arg_str(args, "points")
+    duration = arg_num(args, "duration", 45)
+
+    if arg_str(args, "topics"):
+        step(1, "DeepSeek 生成候选选题")
+        node_args = {
+            "topics": arg_str(args, "topics"),
+            "out": str(Path(arg_str(args, "topics-out") or "output/topics.md")),
+            **copy_llm_args(args),
+        }
+        node1_generate(node_args)
+        return
+
+    from_llm = bool(topic or material or points)
+    if from_llm and not arg_bool(args, "skip-node1"):
+        step(1, "DeepSeek 生成视频脚本")
+        common = {**copy_llm_args(args), "duration": duration, "out": str(script)}
+        if topic:
+            node1_generate({**common, "topic": topic})
+        else:
+            point_file = str(Path(points)) if points else str(Path(arg_str(args, "points-out") or "output/points.md"))
+            if not points:
+                node1_generate({**common, "extract": material, "out": point_file})
+            node1_generate({**common, "book": point_file, "index": arg_num(args, "index", 1)})
+    elif from_llm:
+        dim(f"跳过节点1，直接使用 {rel(script)}")
+
+    if not script.exists():
+        fail(f"找不到视频脚本：{script.resolve()}")
+        print("  提示：节点1 的产出应保存为该文件。可先用示例跑通：", file=sys.stderr)
+        print("    py -3 main.py --script examples/script.yaml --html examples/index.html --skip-node2", file=sys.stderr)
+        raise SystemExit(1)
+
+    parsed_script = read_yaml(script)
+    if not isinstance(parsed_script, dict):
+        die(f"脚本无法解析为 YAML：{script}")
+    out_dir = Path(arg_str(args, "out-dir") or "output")
+    requested_base = sanitize_title(arg_str(args, "name")) if arg_str(args, "name") else base_name_from_script(parsed_script, str(script))
+    base = resolve_base_name(out_dir, requested_base, arg_bool(args, "unique"))
+    paths = output_paths(out_dir, base)
+    final_video = Path(video_override) if video_override else paths["video"]
+    silent_video = Path(arg_str(args, "silent")).resolve() if arg_str(args, "silent") else paths["silent"]
+
+    meta = parsed_script.get("meta") if isinstance(parsed_script.get("meta"), dict) else {}
+    info(f"[产物] 标题：{meta.get('title') or base}")
+    dim(f"  成片：{rel(final_video)}")
+    dim(f"  无声：{rel(silent_video)}")
+
+    need_node2 = arg_bool(args, "force-node2") or from_llm or not html.exists()
+    if arg_bool(args, "skip-node2"):
+        if not html.exists():
+            die(f"--skip-node2 指定了跳过节点2，但 {rel(html)} 不存在。")
+        dim(f"跳过节点2，直接使用 {rel(html)}")
+    elif need_node2:
+        step(2, "DeepSeek 生成 HTML 渲染器")
+        node_args = {"script": str(script), "out": str(html), **copy_llm_args(args)}
+        if arg_str(args, "theme"):
+            node_args["theme"] = arg_str(args, "theme")
+        node2_generate(node_args)
+    else:
+        dim(f"节点2 已有产出 {rel(html)}，跳过（加 --force-node2 可强制重生成）")
+
+    step(3, "逐帧渲染并合成无声视频")
+    render_args = {
+        "html": str(html),
+        "script": str(script),
+        "out": str(out_dir),
+        "silent": str(silent_video),
+    }
+    if clean:
+        render_args["clean"] = True
+    render_frames(render_args)
+
+    if arg_bool(args, "skip-node4"):
+        dim("按要求跳过节点4（不生成配音与 BGM）。")
+        print()
+        ok(f"产出无声视频：{rel(silent_video)}")
+        return
+
+    step(4, "AI 配音 + BGM + 特效字幕")
+    audio_args = {
+        "script": str(script),
+        "video": str(silent_video),
+        "out": str(final_video),
+        "out-dir": str(out_dir),
+        "name": base,
+    }
+    for key in ("bgm-style", "rate", "jamendo-client-id", "voice", "audio-dir", "jamendo-limit"):
+        if key in args:
+            audio_args[key] = args[key]
+    if bgm:
+        audio_args["bgm"] = bgm
+    for flag in ("no-bgm", "no-jamendo", "no-duck", "no-text-normalize", "no-subs"):
+        if arg_bool(args, flag):
+            audio_args[flag] = True
+    if arg_str(args, "subs"):
+        audio_args["subs"] = arg_str(args, "subs")
+    audio_generate(audio_args)
+
+    step(5, "成片质检")
+    qa_args = {
+        "script": str(script),
+        "video": str(final_video),
+        "silent": str(silent_video),
+    }
+    if arg_bool(args, "blackdetect"):
+        qa_args["blackdetect"] = True
+    try:
+        _, hard_fail = qa_run(qa_args)
+        if hard_fail:
+            warn("质检发现问题，请查看上方输出。")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        warn(f"质检执行失败：{exc}")
+
+    minutes = (time.time() - t0) / 60
+    print("\n" + "─" * 60)
+    ok(f"全流程完成，总耗时 {minutes:.1f} 分钟")
+    print(f"  成片：{final_video.resolve()}")
+    print(f"  无声视频：{silent_video.resolve()}")
+    print(f"  字幕/清单：{out_dir.resolve() / base}.{{srt,vtt,ass,audio.json}}")
+    print("─" * 60 + "\n")
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    known_commands = {"node1", "node2", "render", "audio", "qa", "setup"}
+    command = None
+    if argv and not argv[0].startswith("-") and argv[0] in known_commands:
+        command = argv.pop(0)
+
+    args = parse_args(argv)
+
+    if arg_bool(args, "help") or arg_bool(args, "h"):
+        print(USAGE)
+        print(WORKFLOW_SUMMARY)
+        return 0
+    if arg_bool(args, "workflow"):
+        print(WORKFLOW_SUMMARY)
+        return 0
+    if arg_bool(args, "version"):
+        print(f"{APP_NAME} {APP_VERSION}")
+        return 0
+
+    try:
+        if command == "node1":
+            if not any(arg_str(args, k) for k in ("topics", "topic", "extract", "book")):
+                fail("请指定一种模式。")
+                print(NODE1_USAGE, file=sys.stderr)
+                return 1
+            node1_generate(args)
+            return 0
+
+        if command == "node2":
+            if arg_bool(args, "list-themes"):
+                print_theme_names()
+                return 0
+            node2_generate(args)
+            return 0
+
+        if command == "render":
+            render_frames(args)
+            return 0
+
+        if command == "audio":
+            audio_generate(args)
+            return 0
+
+        if command == "qa":
+            _, hard_fail = qa_run(args)
+            return 1 if hard_fail else 0
+
+        if command == "setup":
+            return setup_check_and_install(args)
+
+        if arg_bool(args, "list-themes"):
+            print_theme_names()
+            return 0
+        if arg_bool(args, "setup"):
+            return setup_check_and_install(args)
+
+        run_pipeline(args)
+        return 0
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        fail("已中断。")
+        return 130
+    except Exception as exc:
+        fail(f"流程中断：{exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

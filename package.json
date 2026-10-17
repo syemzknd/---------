@@ -1,0 +1,25 @@
+{
+  "name": "code-video-workflow",
+  "version": "1.0.0",
+  "private": true,
+  "description": "一句话或一份资料自动产出短视频：AI 写脚本 → AI 写渲染器 → 逐帧渲染 → 配音/字幕",
+  "main": "main.js",
+  "scripts": {
+    "setup": "node setup.js",
+    "node1": "node node1.js",
+    "topics": "node node1.js --topics",
+    "node2": "node node2.js",
+    "render": "node render.js",
+    "audio": "node audio.js",
+    "qa": "node qa.js",
+    "start": "node main.js",
+    "demo": "node main.js --script examples/script.yaml --html examples/index.html --skip-node2"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

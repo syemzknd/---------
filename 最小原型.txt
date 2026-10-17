@@ -1,0 +1,767 @@
+下面是一套**可直接运行**的完整实现。按顺序创建文件即可。
+
+---
+
+## 一、项目结构
+
+```text
+code-video-workflow/
+├─ package.json
+├─ setup.js                 # 环境检测与搭建
+├─ main.js                  # 主控：串起节点3和节点4
+├─ render.js                # 节点3：逐帧渲染
+├─ audio.js                 # 节点4：配音 + BGM 合成
+├─ prompts/
+│  └─ node2-prompt.md       # 节点2 提示词
+├─ examples/
+│  ├─ script.yaml           # 示例脚本
+│  └─ index.html            # 示例 HTML（AI 产出物演示）
+├─ frames/                  # 自动生成
+├─ audio/                   # 自动生成，放 voice/bgm
+└─ output/                  # 自动生成，放无声/最终视频
+```
+
+---
+
+## 二、package.json
+
+```json
+{
+  "name": "code-video-workflow",
+  "version": "1.0.0",
+  "description": "由视频脚本自动产出视频：AI 生成 HTML → 逐帧渲染 → 加配音/BGM",
+  "main": "main.js",
+  "scripts": {
+    "setup": "node setup.js",
+    "setup:auto": "node setup.js --auto",
+    "render": "node render.js",
+    "audio": "node audio.js",
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "js-yaml": "^4.1.0"
+  }
+}
+```
+
+---
+
+## 三、setup.js（环境检测与搭建）
+
+```js
+#!/usr/bin/env node
+/**
+ * 环境检测与搭建
+ * 用法：
+ *   node setup.js        交互式
+ *   node setup.js --auto 自动安装
+ */
+const { execSync, spawnSync } = require('child_process');
+const fs = require('fs');
+
+const GREEN = '\x1b[32m';
+const RED = '\x1b[31m';
+const YELLOW = '\x1b[33m';
+const CYAN = '\x1b[36m';
+const RESET = '\x1b[0m';
+
+function log(ok, name, extra = '') {
+  const mark = ok ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`;
+  console.log(`  ${mark} ${name.padEnd(28)} ${extra}`);
+}
+
+function version(cmd, args = ['--version']) {
+  const r = spawnSync(cmd, args, { stdio: 'pipe', shell: process.platform === 'win32' });
+  if (r.status === 0) return (r.stdout.toString().split('\n')[0] || '').trim();
+  return null;
+}
+
+function moduleVersion(name) {
+  try { return 'v' + require(`${name}/package.json`).version; } catch { return null; }
+}
+
+console.log(`\n${CYAN}=== 环境检测 ===${RESET}\n`);
+
+// 1. Node
+const nodeV = version('node');
+log(!!nodeV, 'Node.js', nodeV || '(请安装 Node.js 18+)');
+
+// 2. npm
+const npmV = version('npm');
+log(!!npmV, 'npm', npmV || '(随 Node.js 安装)');
+
+// 3. ffmpeg
+const ffV = version('ffmpeg', ['-version']);
+log(!!ffV, 'ffmpeg', ffV || '(见下方安装指引)');
+
+// 4. edge-tts
+const etV = version('edge-tts');
+log(!!etV, 'edge-tts', etV || '(pip install edge-tts)');
+
+// 5. js-yaml
+const yamlV = moduleVersion('js-yaml');
+log(!!yamlV, 'js-yaml', yamlV || '(npm i js-yaml)');
+
+// 6. playwright
+const pwV = moduleVersion('playwright');
+log(!!pwV, 'playwright', pwV || '(npm i playwright)');
+
+// 7. chromium
+let chromiumOk = false;
+let chromiumPath = '';
+try {
+  const { chromium } = require('playwright');
+  chromiumPath = chromium.executablePath();
+  chromiumOk = fs.existsSync(chromiumPath);
+} catch {}
+log(chromiumOk, 'chromium (playwright)', chromiumOk ? chromiumPath : '(npx playwright install chromium)');
+
+console.log(`\n${CYAN}=== 环境搭建 ===${RESET}\n`);
+
+const auto = process.argv.includes('--auto') || process.argv.includes('-y');
+
+function confirm(msg) {
+  if (auto) { console.log(`自动确认：${msg}`); return true; }
+  const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(res => rl.question(`${msg} [y/N] `, a => { rl.close(); res(a.toLowerCase() === 'y'); }));
+}
+
+(async () => {
+  if (!yamlV) {
+    console.log('安装 js-yaml ...');
+    execSync('npm i js-yaml', { stdio: 'inherit' });
+  }
+  if (!pwV) {
+    console.log('安装 playwright ...');
+    execSync('npm i playwright', { stdio: 'inherit' });
+  }
+  if (!chromiumOk) {
+    console.log('下载 chromium ...');
+    execSync('npx playwright install chromium', { stdio: 'inherit' });
+  }
+  if (!etV) {
+    if (await confirm('安装 edge-tts（需要 Python pip）？')) {
+      try {
+        execSync('pip install edge-tts', { stdio: 'inherit' });
+      } catch {
+        try { execSync('python3 -m pip install edge-tts', { stdio: 'inherit' }); }
+        catch { console.log('安装失败，请手动执行：pip install edge-tts'); }
+      }
+    }
+  }
+  if (!ffV) {
+    console.log(`\n${YELLOW}ffmpeg 未安装，请根据系统安装：${RESET}`);
+    console.log('  macOS:   brew install ffmpeg');
+    console.log('  Ubuntu:  sudo apt install ffmpeg');
+    console.log('  Windows: choco install ffmpeg  或 https://ffmpeg.org/download.html');
+  }
+
+  console.log(`\n${GREEN}环境检查完成。${RESET}\n`);
+})();
+```
+
+---
+
+## 四、prompts/node2-prompt.md（节点2提示词）
+
+把这段提示词 + 视频脚本一起发给 AI，AI 会输出 HTML。
+
+````markdown
+# 角色
+你是一个「编程视频渲染引擎」。你精通 HTML5 Canvas、CSS、JavaScript、时间轴动画和逐帧渲染。你的唯一任务：根据用户提供的视频脚本，生成一个完整的、自包含的 HTML 文件。该 HTML 在浏览器中打开后，会按照脚本描述自动播放一段动画视频，并且支持逐帧渲染导出。
+
+# 核心方法论
+1. 视频 = 连续帧 + 帧率 + 时长。你通过 JavaScript 按帧号计算出每一帧的画面。
+2. 必须实现一个纯函数：renderFrame(frameIndex)。相同 frameIndex 必须得到完全相同的画面。
+3. 时间轴驱动：所有元素的出现、停留、消失、强调都由时间（秒）或帧号控制。
+4. 组件化：把标题、文字、图形、图表、计数器、进度条、箭头、粒子等抽象为绘制函数。
+5. 确定性：禁止使用 Date.now()、performance.now() 影响画面；随机数必须使用固定种子（如 mulberry32）。
+6. 逐帧可导出：暴露全局变量和函数，供 Puppeteer/Playwright 逐帧截图。
+
+# 技术规范
+- 输出单个 HTML 文件，内联所有 CSS 和 JavaScript。
+- 画布尺寸固定为 1920x1080，帧率 FPS = 30。
+- 总时长由脚本决定，默认 30 秒；总帧数 TOTAL_FRAMES = FPS * DURATION。
+- 必须暴露：
+  window.FPS = 30;
+  window.DURATION = 总时长（秒）;
+  window.TOTAL_FRAMES = FPS * DURATION;
+  window.renderFrame = function(frameIndex) { ... };
+- 必须支持两种运行模式：
+  1) 预览模式：URL 不带参数时，自动循环播放。
+  2) 截图模式：URL 带 ?frame=N 时，只渲染第 N 帧，渲染完成后设置 window.__RENDER_DONE__ = true，不再循环。
+- 所有绘制优先使用 Canvas 2D API。
+- 字体栈：system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif；等宽 ui-monospace, Menlo, Consolas, monospace。
+- 不要依赖任何外部网络资源。所有图形用代码绘制。
+- 不处理音频。
+
+# 视频脚本解析
+用户会提供 YAML/JSON/Markdown 格式的视频脚本。通常包含：
+- 元信息：标题、时长、帧率、分辨率
+- 场景列表：起止时间、旁白文字、视觉元素
+- 元素描述：类型、内容、时间区间、动画方式
+若未指定，使用默认值：淡入淡出 0.5 秒、居中布局、主色 #22d3ee、背景 #06080f。
+
+# 支持的视觉元素
+- 标题 / 副标题 / 正文段落
+- 圆形、矩形、线条、箭头
+- 进度条、计数器（数字滚动）
+- 柱状图、折线图、饼图
+- 代码块、公式
+- 粒子、点阵、随机散点
+- 淡入、淡出、滑动、缩放、打字机、描边绘制
+
+# 限制与边界
+- 只做规则化、数据化、图形化、模板化视频。
+- 不能做：实拍、真人、电影级 3D、复杂骨骼动画、流体/爆炸/毛发。
+- 脚本必须包含可映射为图形/文字/数据的明确指令。
+- 不要生成需要用户交互的 HTML。
+- 不要输出任何解释性文字，只输出完整 HTML。
+
+# 输入脚本约定
+脚本必须包含 meta、scenes、narration、elements。
+字段缺失时按默认值补全：fps=30，分辨率 1920x1080，动画 fadeIn/fadeOut，主色 #22d3ee，背景 #06080f。
+把脚本中的文字、数据、时间、动画全部映射到 renderFrame(frameIndex)。
+
+# 输出格式
+直接输出完整 HTML 代码，从 <!DOCTYPE html> 开始，到 </html> 结束。
+不要用 Markdown 代码块包裹，不要添加额外说明。
+````
+
+---
+
+## 五、examples/script.yaml（示例脚本）
+
+```yaml
+meta:
+  title: 为什么π约等于3.14
+  fps: 30
+  width: 1920
+  height: 1080
+  duration: 30
+
+scenes:
+  - id: intro
+    start: 0
+    end: 10
+    narration: "一个圆滚一圈的距离，就是它的周长。"
+    elements:
+      - type: title
+        text: "为什么 π ≈ 3.14？"
+        at: [0, 10]
+        anim: fadeIn
+
+  - id: number
+    start: 10
+    end: 20
+    narration: "用圆的周长除以直径，就得到圆周率。"
+    elements:
+      - type: counter
+        from: 0
+        to: 3.14159
+        precision: 5
+        label: "圆的周长 ÷ 直径"
+        at: [10, 20]
+
+  - id: outro
+    start: 20
+    end: 30
+    narration: "这个数字，永远不会结束。"
+    elements:
+      - type: title
+        text: "π = 3.141592653589793…"
+        at: [20, 30]
+        anim: fadeIn
+```
+
+---
+
+## 六、examples/index.html（演示用，可直接跑通流程）
+
+真实使用时，这个文件由节点2的 AI 生成。
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>示例视频</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#06080f;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas id="stage" width="1920" height="1080"></canvas>
+<script>
+(function(){
+  const W=1920,H=1080,FPS=30,DURATION=30;
+  const ctx=document.getElementById('stage').getContext('2d',{alpha:false});
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const seg=(t,s,e)=>clamp((t-s)/(e-s),0,1);
+  const easeOut=t=>1-Math.pow(1-t,3);
+
+  function drawBackground(){
+    const g=ctx.createRadialGradient(W/2,H/2,60,W/2,H/2,W*0.8);
+    g.addColorStop(0,'#101c36');g.addColorStop(1,'#06080f');
+    ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  }
+
+  function renderFrame(frame){
+    const t=frame/FPS;
+    drawBackground();
+
+    const a1=Math.min(seg(t,0.3,1.5),1-seg(t,9,10));
+    if(a1>0.01){
+      ctx.save();ctx.globalAlpha=a1;
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillStyle='#f8fafc';ctx.font='700 80px system-ui,sans-serif';
+      ctx.fillText('为什么 π ≈ 3.14？', W/2, H/2);
+      ctx.restore();
+    }
+
+    const a2=Math.min(seg(t,10,11),1-seg(t,19,20));
+    if(a2>0.01){
+      ctx.save();ctx.globalAlpha=a2;
+      const p=easeOut(seg(t,11,18));
+      const val=(p*3.14159).toFixed(5);
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillStyle='#fbbf24';ctx.font='700 160px ui-monospace,monospace';
+      ctx.fillText(val, W/2, H/2);
+      ctx.fillStyle='#f8fafc';ctx.font='600 50px system-ui,sans-serif';
+      ctx.fillText('圆的周长 ÷ 直径', W/2, H/2+150);
+      ctx.restore();
+    }
+
+    const a3=Math.min(seg(t,20,21),1-seg(t,29,30));
+    if(a3>0.01){
+      ctx.save();ctx.globalAlpha=a3;
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillStyle='#f8fafc';ctx.font='700 200px Georgia,serif';
+      ctx.fillText('π', W/2, H/2-60);
+      ctx.fillStyle='#22d3ee';ctx.font='600 54px ui-monospace,monospace';
+      ctx.fillText('= 3.141592653589793…', W/2, H/2+150);
+      ctx.restore();
+    }
+  }
+
+  window.FPS=FPS;window.DURATION=DURATION;window.TOTAL_FRAMES=FPS*DURATION;
+  window.renderFrame=renderFrame;
+
+  const params=new URLSearchParams(location.search);
+  if(params.has('frame')){
+    renderFrame(Number(params.get('frame'))||0);
+    window.__RENDER_DONE__=true;
+  }else{
+    let t0=performance.now();
+    (function loop(){
+      const elapsed=(performance.now()-t0)/1000;
+      if(elapsed>=DURATION)t0=performance.now();
+      const tt=((performance.now()-t0)/1000)%DURATION;
+      renderFrame(Math.floor(tt*FPS));
+      requestAnimationFrame(loop);
+    })();
+  }
+})();
+</script>
+</body>
+</html>
+```
+
+---
+
+## 七、render.js（节点3：逐帧渲染 + 无声视频）
+
+```js
+#!/usr/bin/env node
+/**
+ * 节点3：逐帧渲染 HTML 并合成无声视频
+ * 用法：node render.js --html index.html --frames frames --out output
+ */
+const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
+const { pathToFileURL } = require('url');
+const { execSync } = require('child_process');
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const v = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const htmlPath = path.resolve(args.html || 'index.html');
+  const framesDir = path.resolve(args.frames || 'frames');
+  const outDir = path.resolve(args.out || 'output');
+  const fpsOverride = args.fps ? Number(args.fps) : null;
+
+  if (!fs.existsSync(htmlPath)) {
+    console.error('找不到 HTML 文件：' + htmlPath);
+    process.exit(1);
+  }
+
+  fs.rmSync(framesDir, { recursive: true, force: true });
+  fs.mkdirSync(framesDir, { recursive: true });
+  fs.mkdirSync(outDir, { recursive: true });
+
+  console.log('[节点3] 启动浏览器...');
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const page = await browser.newPage({
+    viewport: { width: 1920, height: 1080 },
+    deviceScaleFactor: 1
+  });
+
+  page.on('console', msg => {
+    if (msg.type() === 'error') console.log('[page error]', msg.text());
+  });
+  page.on('pageerror', err => console.log('[page error]', err.message));
+
+  const url = pathToFileURL(htmlPath).href + '?frame=0';
+  console.log('[节点3] 加载：' + url);
+  await page.goto(url, { waitUntil: 'load' });
+
+  await page.waitForFunction(() => window.__RENDER_DONE__ === true, { timeout: 30000 });
+
+  const meta = await page.evaluate(() => ({
+    FPS: window.FPS,
+    DURATION: window.DURATION,
+    TOTAL_FRAMES: window.TOTAL_FRAMES
+  }));
+
+  const fps = fpsOverride || meta.FPS || 30;
+  const total = meta.TOTAL_FRAMES || Math.round((meta.DURATION || 30) * fps);
+
+  console.log(`[节点3] 总帧数：${total}，帧率：${fps}`);
+
+  const t0 = Date.now();
+  for (let i = 0; i < total; i++) {
+    await page.evaluate(async (frame) => {
+      window.renderFrame(frame);
+      await new Promise(r => requestAnimationFrame(r));
+    }, i);
+
+    const file = path.join(framesDir, `frame-${String(i).padStart(5, '0')}.png`);
+    await page.screenshot({ path: file, type: 'png' });
+
+    if (i % 15 === 0 || i === total - 1) {
+      const pct = ((i + 1) / total * 100).toFixed(1);
+      const used = (Date.now() - t0) / 1000;
+      const eta = i > 0 ? (used / (i + 1) * (total - i - 1)).toFixed(0) : '?';
+      process.stdout.write(`\r[节点3] 渲染 ${i + 1}/${total} (${pct}%) ETA ${eta}s   `);
+    }
+  }
+  console.log('');
+
+  await browser.close();
+
+  const silentPath = path.join(outDir, 'video_silent.mp4');
+  const cmd = `ffmpeg -y -framerate ${fps} -i "${path.join(framesDir, 'frame-%05d.png')}" ` +
+    `-c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium "${silentPath}"`;
+  console.log('[节点3] 合成无声视频：' + silentPath);
+  execSync(cmd, { stdio: 'inherit' });
+
+  console.log('[节点3] 完成 ✓ ' + silentPath);
+}
+
+main().catch(err => {
+  console.error('[节点3] 失败：', err);
+  process.exit(1);
+});
+```
+
+---
+
+## 八、audio.js（节点4：AI 配音 + BGM）
+
+```js
+#!/usr/bin/env node
+/**
+ * 节点4：AI 配音 + BGM 合成
+ * 用法：node audio.js --script script.yaml --video output/video_silent.mp4 --bgm audio/bgm.mp3 --out output/final.mp4
+ */
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+const yaml = require('js-yaml');
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const v = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function run(cmd) {
+  console.log('$ ' + cmd);
+  execSync(cmd, { stdio: 'inherit' });
+}
+
+function runSafe(cmd) {
+  try { execSync(cmd, { stdio: 'inherit' }); return true; }
+  catch (e) { return false; }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const scriptPath = path.resolve(args.script || 'script.yaml');
+  const videoPath = path.resolve(args.video || 'output/video_silent.mp4');
+  const bgmPath = path.resolve(args.bgm || 'audio/bgm.mp3');
+  const outPath = path.resolve(args.out || 'output/final.mp4');
+  const voice = args.voice || 'zh-CN-XiaoxiaoNeural';
+  const rate = args.rate || '+0%';
+  const bgmVolume = args.bgmVolume || '0.25';
+
+  if (!fs.existsSync(scriptPath)) {
+    console.error('[节点4] 找不到脚本：' + scriptPath);
+    process.exit(1);
+  }
+  if (!fs.existsSync(videoPath)) {
+    console.error('[节点4] 找不到无声视频：' + videoPath);
+    process.exit(1);
+  }
+
+  const script = yaml.load(fs.readFileSync(scriptPath, 'utf8'));
+  const scenes = script.scenes || [];
+
+  fs.mkdirSync('audio', { recursive: true });
+  fs.mkdirSync('output', { recursive: true });
+
+  // 1. 逐段生成配音
+  const voiceFiles = [];
+  for (let i = 0; i < scenes.length; i++) {
+    const s = scenes[i];
+    if (!s.narration) continue;
+    const file = path.resolve('audio', `voice_${String(i).padStart(2, '0')}.mp3`);
+    const text = s.narration.replace(/"/g, '\\"');
+    console.log(`[节点4] 生成配音 ${i + 1}/${scenes.length}：${text.slice(0, 30)}...`);
+    const ok = runSafe(
+      `edge-tts --voice ${voice} --rate=${rate} --text "${text}" --write-media "${file}"`
+    );
+    if (!ok) {
+      console.error('[节点4] edge-tts 失败，请确认已安装：pip install edge-tts');
+      process.exit(1);
+    }
+    voiceFiles.push({ file, start: s.start || 0 });
+  }
+
+  if (voiceFiles.length === 0) {
+    console.error('[节点4] 脚本中没有 narration，无法生成配音。');
+    process.exit(1);
+  }
+
+  // 2. 按时间轴拼接配音
+  const voiceMp3 = path.resolve('audio', 'voice.mp3');
+  if (voiceFiles.length === 1) {
+    fs.copyFileSync(voiceFiles[0].file, voiceMp3);
+  } else {
+    const inputs = voiceFiles.map(v => `-i "${v.file}"`).join(' ');
+    const parts = [];
+    const labels = [];
+    voiceFiles.forEach((v, i) => {
+      const delayMs = Math.round((v.start || 0) * 1000);
+      parts.push(`[${i}:a]adelay=${delayMs}|${delayMs}[a${i}]`);
+      labels.push(`[a${i}]`);
+    });
+    parts.push(`${labels.join('')}amix=inputs=${voiceFiles.length}:duration=longest:dropout_transition=2[voice]`);
+    run(`ffmpeg -y ${inputs} -filter_complex "${parts.join(';')}" -map "[voice]" "${voiceMp3}"`);
+  }
+
+  // 3. 与视频、BGM 混音
+  if (!fs.existsSync(bgmPath)) {
+    console.warn('[节点4] 未找到 BGM：' + bgmPath + '，仅使用配音。');
+    run(
+      `ffmpeg -y -i "${videoPath}" -i "${voiceMp3}" ` +
+      `-filter_complex "[1:a]volume=1.0[a]" -map 0:v -map "[a]" ` +
+      `-c:v copy -c:a aac -b:a 192k -shortest "${outPath}"`
+    );
+  } else {
+    const filter =
+      `[1:a]volume=1.0[voice];` +
+      `[2:a]volume=${bgmVolume}[bgm];` +
+      `[bgm][voice]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[bgmduck];` +
+      `[voice][bgmduck]amix=inputs=2:duration=longest:dropout_transition=2[a]`;
+    run(
+      `ffmpeg -y -i "${videoPath}" -i "${voiceMp3}" -i "${bgmPath}" ` +
+      `-filter_complex "${filter}" -map 0:v -map "[a]" ` +
+      `-c:v copy -c:a aac -b:a 192k -shortest "${outPath}"`
+    );
+  }
+
+  console.log('[节点4] 完成 ✓ ' + outPath);
+}
+
+main().catch(err => {
+  console.error('[节点4] 失败：', err);
+  process.exit(1);
+});
+```
+
+---
+
+## 九、main.js（主控流程）
+
+```js
+#!/usr/bin/env node
+/**
+ * 主控：节点3 + 节点4
+ * 节点1（生成脚本）和节点2（AI 生成 HTML）由用户/外部流程完成
+ * 用法：node main.js --html index.html --script script.yaml --bgm audio/bgm.mp3
+ */
+const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const v = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function run(cmd) {
+  console.log('\n>>> ' + cmd + '\n');
+  execSync(cmd, { stdio: 'inherit' });
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const html = args.html || 'index.html';
+  const script = args.script || 'script.yaml';
+  const bgm = args.bgm || 'audio/bgm.mp3';
+
+  if (!fs.existsSync(html)) {
+    console.error('找不到 HTML：' + html + '，请先完成节点2（AI 生成 HTML）。');
+    process.exit(1);
+  }
+  if (!fs.existsSync(script)) {
+    console.error('找不到脚本：' + script);
+    process.exit(1);
+  }
+
+  console.log('=== 节点3：逐帧渲染 ===');
+  run(`node render.js --html "${html}"`);
+
+  console.log('=== 节点4：配音 + BGM 合成 ===');
+  run(`node audio.js --script "${script}" --bgm "${bgm}"`);
+
+  console.log('\n=== 全部完成 ===');
+  console.log('最终视频：output/final.mp4');
+}
+
+main().catch(err => {
+  console.error('流程失败：', err);
+  process.exit(1);
+});
+```
+
+---
+
+## 十、使用流程
+
+### 1. 初始化
+
+```bash
+# 创建项目目录并放入以上文件
+cd code-video-workflow
+
+# 安装依赖 + 检测环境（交互式）
+npm run setup
+
+# 或自动安装
+npm run setup:auto
+```
+
+### 2. 节点1：准备视频脚本
+
+把其他工作流产出的脚本保存为 `script.yaml`（参考 `examples/script.yaml`）。
+
+### 3. 节点2：AI 生成 HTML
+
+- 打开 `prompts/node2-prompt.md`，复制提示词。
+- 连同 `script.yaml` 内容一起发给 AI。
+- AI 输出 HTML，保存为 `index.html`。
+
+如果 AI 输出了 ```html 代码块，剥掉外层标记即可。
+
+### 4. 准备 BGM
+
+把无版权音乐放到：
+
+```text
+audio/bgm.mp3
+```
+
+没有也可以跑，会自动跳过 BGM。
+
+### 5. 一键跑完节点3 + 节点4
+
+```bash
+node main.js --html index.html --script script.yaml --bgm audio/bgm.mp3
+```
+
+输出：
+
+```text
+output/video_silent.mp4   # 无声视频
+audio/voice.mp3           # 合成配音
+output/final.mp4          # 最终视频（带配音 + BGM）
+```
+
+### 6. 只跑单节点
+
+```bash
+# 只渲染
+node render.js --html index.html
+
+# 只做音频
+node audio.js --script script.yaml --bgm audio/bgm.mp3
+```
+
+---
+
+## 十一、用演示文件快速验证
+
+如果你暂时没有 AI 产出的 HTML，用 `examples/index.html` 和 `examples/script.yaml` 就能把整条链路跑通：
+
+```bash
+cp examples/index.html ./index.html
+cp examples/script.yaml ./script.yaml
+node main.js --html index.html --script script.yaml --bgm audio/bgm.mp3
+```
+
+最终生成 `output/final.mp4`。
+
+---
+
+## 十二、常见问题
+
+- **找不到 `edge-tts`**：`pip install edge-tts`，确保 pip 对应的 Python 在 PATH 中。
+- **ffmpeg 报 `Unknown encoder libx264`**：重装完整版 ffmpeg。
+- **Playwright 截图卡住**：检查 HTML 是否在 `?frame=N` 模式下设置了 `window.__RENDER_DONE__ = true`。
+- **配音太长超出场景**：缩短文案，或在脚本里把 `start` 往后调。
+- **Windows 路径带空格**：所有路径已用双引号包裹，正常可跑。
+- **渲染速度慢**：这是逐帧截图的固有代价，30 秒 × 30fps = 900 帧，通常 2~5 分钟。追求更快可换 Remotion 或 WebCodecs。
+
+这套代码可以做到：**输入脚本 → AI 生成 HTML → 自动渲染 → 加配音/BGM → 输出成片**，全程无需手动干预。

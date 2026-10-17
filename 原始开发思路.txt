@@ -1,0 +1,280 @@
+由简易视频脚本自动化产出简易视频的工作流（完善版）
+总体流程
+text
+节点0：环境准备
+节点1：根据需求从其他工作流得到视频脚本
+节点2：将“编程做视频提示词 + 视频脚本”给 AI，得到 HTML
+节点3：自动运行 HTML，逐帧渲染并合成无声视频
+节点4：用 ffmpeg 自动加入 AI 配音和 BGM，输出最终视频
+节点5：质检与发布
+目录结构建议
+text
+project/
+├─ script.yaml              # 节点1产出的视频脚本
+├─ index.html               # 节点2 AI 产出的 HTML
+├─ render.js                # 节点3 逐帧渲染脚本
+├─ frames/                  # 逐帧截图
+│  ├─ frame-00000.png
+│  ├─ frame-00001.png
+│  └─ ...
+├─ audio/
+│  ├─ voice.mp3            # AI 配音
+│  └─ bgm.mp3              # 背景音乐
+└─ output/
+   ├─ video_silent.mp4     # 无声视频
+   └─ final.mp4            # 最终视频
+节点0：环境准备
+需要安装：
+
+bash
+# Node.js 与 Playwright
+npm init -y
+npm i playwright
+npx playwright install chromium
+
+# ffmpeg
+# 根据系统安装：brew install ffmpeg / apt install ffmpeg / choco install ffmpeg
+
+# TTS 示例：edge-tts
+pip install edge-tts
+节点1：视频脚本规范
+节点1的输出建议统一为 YAML 或 JSON，方便节点2的 AI 解析。
+
+最小脚本示例：
+
+yaml
+meta:
+  title: 为什么π约等于3.14
+  fps: 30
+  width: 1920
+  height: 1080
+  duration: 30
+
+scenes:
+  - id: intro
+    start: 0
+    end: 8
+    narration: "一个圆滚一圈的距离，就是周长。"
+    elements:
+      - type: title
+        text: "一个圆，滚一圈能滚多远？"
+        at: [0, 2]
+        anim: fadeUp
+      - type: circleRoll
+        radius: 120
+        at: [1.5, 6]
+        showDiameter: true
+
+  - id: monteCarlo
+    start: 8
+    end: 19
+    narration: "用随机撒点的方法，也能逼近π。"
+    elements:
+      - type: monteCarlo
+        points: 2600
+        at: [0, 9]
+      - type: counter
+        label: "π ≈ 4 × 圆内 ÷ 总数"
+        at: [2, 9]
+要求：
+
+必须包含 meta.duration、scenes、narration、elements。
+
+时间单位统一为秒。
+
+元素类型尽量使用节点2提示词中支持的类型。
+
+缺少的参数由 AI 按默认值补全。
+
+节点2：AI 生成 HTML
+使用你提供的提示词。建议在提示词末尾追加以下“输入脚本约定”：
+
+text
+# 输入脚本约定
+用户会提供视频脚本，格式为 YAML / JSON / Markdown。
+脚本必须包含 meta、scenes、narration、elements。
+如果字段缺失，按以下默认值补全：
+- fps = 30
+- 分辨率 = 1920x1080
+- 动画 = fadeIn / fadeOut
+- 主色 = #22d3ee
+- 背景 = #06080f
+你需要把脚本中的文字、数据、时间、动画全部映射到 renderFrame(frameIndex)。
+输出必须是完整 HTML，不要用 Markdown 代码块包裹。
+如果 AI 仍然输出了 ```html 代码块，在自动化流程中先剥离：
+
+js
+function stripMarkdownCodeBlock(text) {
+  return text.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/i, '').trim();
+}
+保存为 index.html。
+
+节点3：自动运行 HTML 转视频
+推荐方案：Playwright 逐帧截图 + ffmpeg 合成。
+优点是稳定、可精确控制每一帧、不会丢帧。
+
+3.1 逐帧渲染脚本 render.js
+js
+const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
+const { pathToFileURL } = require('url');
+
+(async () => {
+  const htmlPath = path.resolve(process.argv[2] || 'index.html');
+  const outDir = path.resolve(process.argv[3] || 'frames');
+
+  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({
+    viewport: { width: 1920, height: 1080 },
+    deviceScaleFactor: 1
+  });
+
+  const url = pathToFileURL(htmlPath).href + '?frame=0';
+  await page.goto(url);
+  await page.waitForFunction(() => window.__RENDER_DONE__ === true);
+
+  const total = await page.evaluate(() => window.TOTAL_FRAMES);
+  const fps = await page.evaluate(() => window.FPS);
+
+  for (let i = 0; i < total; i++) {
+    await page.evaluate(async (frame) => {
+      window.renderFrame(frame);
+      await new Promise(r => requestAnimationFrame(r));
+      window.__RENDER_DONE__ = true;
+    }, i);
+
+    const file = path.join(outDir, `frame-${String(i).padStart(5, '0')}.png`);
+    await page.screenshot({ path: file, type: 'png' });
+
+    if (i % 30 === 0) console.log(`渲染中：${i}/${total}`);
+  }
+
+  await browser.close();
+  console.log(`渲染完成：${total} 帧 @ ${fps}fps`);
+})();
+运行：
+
+bash
+node render.js index.html frames
+3.2 合成无声视频
+bash
+ffmpeg -y -framerate 30 -i frames/frame-%05d.png \
+  -c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium \
+  output/video_silent.mp4
+如果脚本中 fps 不是 30，把 -framerate 30 改成对应值。
+
+3.3 可选：实时录制方案
+如果不想逐帧截图，也可以在 HTML 里用 canvas.captureStream(30) + MediaRecorder 录制成 WebM。
+但不推荐用于正式产出，因为可能丢帧、音画不同步、编码质量不稳定。
+
+节点4：AI 配音 + BGM 合成
+4.1 生成 AI 配音
+用 edge-tts 示例：
+
+bash
+edge-tts --voice zh-CN-XiaoxiaoNeural \
+  --text "一个圆滚一圈的距离，就是周长。" \
+  --write-media audio/voice_01.mp3
+如果脚本有多段旁白，逐段生成后按时间轴拼接或延迟。
+
+按时间轴对齐示例：
+
+bash
+ffmpeg -y -i audio/voice_01.mp3 -i audio/voice_02.mp3 \
+  -filter_complex "[0:a]adelay=0|0[a0];[1:a]adelay=8000|8000[a1];[a0][a1]amix=inputs=2:duration=longest[a]" \
+  -map "[a]" audio/voice.mp3
+说明：8000 表示第 2 段旁白从第 8 秒开始，单位毫秒。实际值按脚本 start 时间填写。
+
+4.2 准备 BGM
+把无版权背景音乐放到：
+
+text
+audio/bgm.mp3
+BGM 音量建议控制在 0.2 ~ 0.3，不要盖过人声。
+
+4.3 混音输出最终视频
+基础混音：
+
+bash
+ffmpeg -y -i output/video_silent.mp4 -i audio/voice.mp3 -i audio/bgm.mp3 \
+  -filter_complex "[1:a]volume=1.0[voice];[2:a]volume=0.25[bgm];[voice][bgm]amix=inputs=2:duration=longest:dropout_transition=2[a]" \
+  -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k -shortest \
+  output/final.mp4
+带自动闪避（BGM 在人声出现时自动降低）的混音：
+
+bash
+ffmpeg -y -i output/video_silent.mp4 -i audio/voice.mp3 -i audio/bgm.mp3 \
+  -filter_complex "[1:a]volume=1.0[voice];[2:a]volume=0.3[bgm];[bgm][voice]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[bgmduck];[voice][bgmduck]amix=inputs=2:duration=longest:dropout_transition=2[a]" \
+  -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k -shortest \
+  output/final.mp4
+最终得到：
+
+text
+output/final.mp4
+节点5：质检与发布
+检查项：
+
+视频时长是否等于脚本 meta.duration，误差小于 0.5 秒。
+
+帧率是否为 30，画面是否流畅。
+
+旁白是否与画面对应，是否溢出或提前结束。
+
+BGM 是否盖过人声。
+
+是否有黑帧、白帧、空白帧。
+
+HTML 是否完全离线，无外部网络依赖。
+
+最终文件是否为 final.mp4，编码为 H.264 + AAC。
+
+最小可运行命令串
+bash
+# 1. 节点2：AI 生成 index.html 后
+# 2. 逐帧渲染
+node render.js index.html frames
+
+# 3. 合成无声视频
+ffmpeg -y -framerate 30 -i frames/frame-%05d.png \
+  -c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium \
+  output/video_silent.mp4
+
+# 4. 生成配音
+edge-tts --voice zh-CN-XiaoxiaoNeural \
+  --text "你的旁白文案" \
+  --write-media audio/voice.mp3
+
+# 5. 混音输出
+ffmpeg -y -i output/video_silent.mp4 -i audio/voice.mp3 -i audio/bgm.mp3 \
+  -filter_complex "[1:a]volume=1.0[voice];[2:a]volume=0.25[bgm];[voice][bgm]amix=inputs=2:duration=longest:dropout_transition=2[a]" \
+  -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k -shortest \
+  output/final.mp4
+限制与边界
+这套工作流只能做：
+
+规则化、数据化、图形化、模板化视频。
+
+科普动画、数据可视化、教程、产品介绍、图表动画、文字动画。
+
+批量个性化视频：换文字、换数据、换语言。
+
+不能做：
+
+实拍视频、真人出镜。
+
+电影级 3D、复杂运镜、复杂人物表演。
+
+流体、爆炸、毛发、布料等高真实感渲染。
+
+任意自然语言直接生成任意画面。
+
+完全无模板的“一句话出大片”。
+
+核心原则：
+
+AI 不直接画每一帧，而是把视频脚本翻译成 HTML 渲染器；渲染器逐帧绘制，ffmpeg 负责编码和音频合成。
+脚本越结构化，组件库越丰富，自动化产出越稳定。

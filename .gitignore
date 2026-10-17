@@ -1,0 +1,15 @@
+node_modules/
+frames/
+output/
+
+# 配音中间产物（临时的 txt/srt 与分段 mp3）
+audio/voice*.mp3
+audio/voice.mp3
+audio/.txt/
+
+# 生成物
+index.html
+*.generated.html
+*.partial.html
+script.yaml
+.env

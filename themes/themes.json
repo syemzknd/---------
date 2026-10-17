@@ -1,0 +1,652 @@
+{
+  "paper": {
+    "name": "paper",
+    "background": "paper",
+    "music": "warm",
+    "dark": false,
+    "bg": "#f7f3ea",
+    "ink": "#26221d",
+    "muted": "#857f73",
+    "surface": "#fffdf8",
+    "accent": "red",
+    "colors": {
+      "red": "#df5a3f",
+      "orange": "#ee8f3a",
+      "yellow": "#f1c04e",
+      "green": "#4f9a66",
+      "teal": "#2c9c8f",
+      "blue": "#3c6fa8",
+      "purple": "#7b5fa6",
+      "pink": "#e07397",
+      "gray": "#8f887b",
+      "ink": "#26221d"
+    },
+    "fonts": {
+      "display": {
+        "family": "Kalam",
+        "weight": 700
+      },
+      "body": {
+        "family": "Kalam",
+        "weight": 400
+      },
+      "hand": {
+        "family": "Patrick Hand",
+        "weight": 400
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "weight": 400
+      }
+    },
+    "stroke": {
+      "rough": true,
+      "roughness": 1.15,
+      "bowing": 1.2,
+      "width": 4.5,
+      "fillStyle": "solid",
+      "hachureGap": 11,
+      "fillWeight": 2.4
+    },
+    "radius": 14,
+    "tintStrength": 0.2,
+    "shadow": null,
+    "enter": {
+      "shape": "draw",
+      "text": "write",
+      "title": "write",
+      "icon": "draw",
+      "image": "pop",
+      "list": "write",
+      "code": "fade",
+      "chart": "grow",
+      "number": "fade"
+    },
+    "transition": "brush",
+    "sfx": {
+      "shape": "scribble",
+      "arrow": "scribble",
+      "line": "scribble",
+      "icon": "pop",
+      "image": "pop",
+      "text": null,
+      "title": null,
+      "list": "blip",
+      "number": "tick",
+      "annotate": "scribble",
+      "chart": "scribble",
+      "code": "type",
+      "terminal": "type",
+      "burst": "sparkle",
+      "transition": "swipe"
+    },
+    "code": {
+      "bg": "#2b2723",
+      "fg": "#f3ede2",
+      "comment": "#8f887b",
+      "keyword": "#f19a6b",
+      "string": "#a8d08d",
+      "number": "#f1c04e",
+      "fn": "#8cc4f2",
+      "punct": "#c9c1b3",
+      "lineNo": "#6d665b",
+      "highlight": "rgba(241,192,78,0.18)",
+      "border": "#26221d"
+    },
+    "terminal": {
+      "bg": "#23201c",
+      "fg": "#f3ede2",
+      "prompt": "#f1c04e",
+      "muted": "#9c9486",
+      "bar": "#35302a"
+    },
+    "caption": {
+      "bg": "rgba(38,34,29,0.86)",
+      "fg": "#fffdf8",
+      "active": "#f1c04e"
+    }
+  },
+  "clean": {
+    "name": "clean",
+    "background": "dots",
+    "music": "upbeat",
+    "dark": false,
+    "bg": "#f4f6fb",
+    "ink": "#111827",
+    "muted": "#667085",
+    "surface": "#ffffff",
+    "accent": "blue",
+    "colors": {
+      "red": "#f04452",
+      "orange": "#ff8a3d",
+      "yellow": "#f5b829",
+      "green": "#12b886",
+      "teal": "#0ea5a4",
+      "blue": "#3b6cf6",
+      "purple": "#7c5cff",
+      "pink": "#ec4899",
+      "gray": "#98a2b3",
+      "ink": "#111827"
+    },
+    "fonts": {
+      "display": {
+        "family": "Plus Jakarta Sans",
+        "weight": 800,
+        "tracking": -0.025
+      },
+      "body": {
+        "family": "Inter",
+        "weight": 400
+      },
+      "hand": {
+        "family": "Kalam",
+        "weight": 400
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "weight": 400
+      }
+    },
+    "stroke": {
+      "rough": false,
+      "width": 3.5
+    },
+    "radius": 22,
+    "tintStrength": 0.12,
+    "shadow": {
+      "color": "rgba(16,24,40,0.12)",
+      "blur": 30,
+      "y": 12
+    },
+    "enter": {
+      "shape": "pop",
+      "text": "rise",
+      "title": "rise",
+      "icon": "pop",
+      "image": "pop",
+      "list": "rise",
+      "code": "rise",
+      "chart": "grow",
+      "number": "rise",
+      "arrow": "draw",
+      "line": "draw"
+    },
+    "transition": "slide",
+    "sfx": {
+      "shape": "pop",
+      "arrow": "whoosh",
+      "line": "whoosh",
+      "icon": "pop",
+      "image": "pop",
+      "text": null,
+      "title": null,
+      "list": "blip",
+      "number": "tick",
+      "annotate": "whoosh",
+      "chart": "whoosh",
+      "code": "type",
+      "terminal": "type",
+      "burst": "sparkle",
+      "transition": "swipe"
+    },
+    "code": {
+      "bg": "#0f172a",
+      "fg": "#e2e8f0",
+      "comment": "#64748b",
+      "keyword": "#c084fc",
+      "string": "#86efac",
+      "number": "#fbbf24",
+      "fn": "#7dd3fc",
+      "punct": "#94a3b8",
+      "lineNo": "#475569",
+      "highlight": "rgba(59,108,246,0.25)",
+      "border": "#0f172a"
+    },
+    "terminal": {
+      "bg": "#0f172a",
+      "fg": "#e2e8f0",
+      "prompt": "#34d399",
+      "muted": "#94a3b8",
+      "bar": "#1e293b"
+    },
+    "caption": {
+      "bg": "rgba(17,24,39,0.82)",
+      "fg": "#ffffff",
+      "active": "#7aa2ff"
+    }
+  },
+  "chalk": {
+    "name": "chalk",
+    "background": "chalk",
+    "music": "calm",
+    "dark": true,
+    "bg": "#233d31",
+    "ink": "#f2f0e6",
+    "muted": "#a9b8ae",
+    "surface": "#2b4a3c",
+    "accent": "yellow",
+    "colors": {
+      "red": "#f28b82",
+      "orange": "#f7b267",
+      "yellow": "#f6e27f",
+      "green": "#a8e6a1",
+      "teal": "#84dcc6",
+      "blue": "#9fd3ef",
+      "purple": "#c7aef2",
+      "pink": "#f6a8bf",
+      "gray": "#c9d1cb",
+      "ink": "#f2f0e6"
+    },
+    "fonts": {
+      "display": {
+        "family": "Cabin Sketch",
+        "weight": 700
+      },
+      "body": {
+        "family": "Patrick Hand",
+        "weight": 400
+      },
+      "hand": {
+        "family": "Patrick Hand",
+        "weight": 400
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "weight": 400
+      }
+    },
+    "stroke": {
+      "rough": true,
+      "roughness": 1.35,
+      "bowing": 1.1,
+      "width": 5,
+      "fillStyle": "solid",
+      "hachureGap": 13,
+      "fillWeight": 2.6,
+      "texture": "chalk"
+    },
+    "radius": 12,
+    "tintStrength": 0.16,
+    "shadow": null,
+    "enter": {
+      "shape": "draw",
+      "text": "write",
+      "title": "write",
+      "icon": "draw",
+      "image": "fade",
+      "list": "write",
+      "code": "fade",
+      "chart": "grow",
+      "number": "fade"
+    },
+    "transition": "brush",
+    "sfx": {
+      "shape": "chalk",
+      "arrow": "chalk",
+      "line": "chalk",
+      "icon": "chalk",
+      "image": "pop",
+      "text": null,
+      "title": null,
+      "list": "blip",
+      "number": "tick",
+      "annotate": "chalk",
+      "chart": "chalk",
+      "code": "type",
+      "terminal": "type",
+      "burst": "sparkle",
+      "transition": "swipe"
+    },
+    "code": {
+      "bg": "#1b3027",
+      "fg": "#f2f0e6",
+      "comment": "#8fa497",
+      "keyword": "#f6e27f",
+      "string": "#a8e6a1",
+      "number": "#f7b267",
+      "fn": "#9fd3ef",
+      "punct": "#c9d1cb",
+      "lineNo": "#6f8577",
+      "highlight": "rgba(246,226,127,0.16)",
+      "border": "#f2f0e6"
+    },
+    "terminal": {
+      "bg": "#172a21",
+      "fg": "#f2f0e6",
+      "prompt": "#f6e27f",
+      "muted": "#a9b8ae",
+      "bar": "#1f3a2d"
+    },
+    "caption": {
+      "bg": "rgba(20,34,27,0.88)",
+      "fg": "#f2f0e6",
+      "active": "#f6e27f"
+    }
+  },
+  "blueprint": {
+    "name": "blueprint",
+    "background": "grid",
+    "music": "tech",
+    "dark": true,
+    "bg": "#12508f",
+    "ink": "#f1f7ff",
+    "muted": "#a9cbef",
+    "surface": "#185c9f",
+    "accent": "yellow",
+    "colors": {
+      "red": "#ff8a80",
+      "orange": "#ffbd70",
+      "yellow": "#ffd866",
+      "green": "#a3f0b8",
+      "teal": "#8ff0e4",
+      "blue": "#9fd6ff",
+      "purple": "#d0b8ff",
+      "pink": "#ffb3d1",
+      "gray": "#c3daf2",
+      "ink": "#f1f7ff"
+    },
+    "fonts": {
+      "display": {
+        "family": "Architects Daughter",
+        "weight": 400
+      },
+      "body": {
+        "family": "Architects Daughter",
+        "weight": 400
+      },
+      "hand": {
+        "family": "Architects Daughter",
+        "weight": 400
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "weight": 400
+      }
+    },
+    "stroke": {
+      "rough": true,
+      "roughness": 0.55,
+      "bowing": 0.6,
+      "width": 3.5,
+      "fillStyle": "solid",
+      "hachureGap": 14,
+      "fillWeight": 1.4
+    },
+    "radius": 6,
+    "tintStrength": 0.14,
+    "shadow": null,
+    "enter": {
+      "shape": "draw",
+      "text": "write",
+      "title": "write",
+      "icon": "draw",
+      "image": "fade",
+      "list": "write",
+      "code": "fade",
+      "chart": "grow",
+      "number": "fade"
+    },
+    "transition": "wipe",
+    "sfx": {
+      "shape": "scribble",
+      "arrow": "whoosh",
+      "line": "scribble",
+      "icon": "click",
+      "image": "pop",
+      "text": null,
+      "title": null,
+      "list": "blip",
+      "number": "tick",
+      "annotate": "scribble",
+      "chart": "scribble",
+      "code": "type",
+      "terminal": "type",
+      "burst": "sparkle",
+      "transition": "swipe"
+    },
+    "code": {
+      "bg": "#0d3d6e",
+      "fg": "#f1f7ff",
+      "comment": "#8fb6dd",
+      "keyword": "#ffd866",
+      "string": "#a3f0b8",
+      "number": "#ffbd70",
+      "fn": "#9fd6ff",
+      "punct": "#c3daf2",
+      "lineNo": "#6f9ccc",
+      "highlight": "rgba(255,216,102,0.16)",
+      "border": "#f1f7ff"
+    },
+    "terminal": {
+      "bg": "#0b345e",
+      "fg": "#f1f7ff",
+      "prompt": "#ffd866",
+      "muted": "#a9cbef",
+      "bar": "#0e4478"
+    },
+    "caption": {
+      "bg": "rgba(8,40,74,0.88)",
+      "fg": "#f1f7ff",
+      "active": "#ffd866"
+    }
+  },
+  "midnight": {
+    "name": "midnight",
+    "background": "glow",
+    "music": "tech",
+    "dark": true,
+    "bg": "#0b1020",
+    "ink": "#e8eef8",
+    "muted": "#8a97ad",
+    "surface": "#141c31",
+    "accent": "teal",
+    "colors": {
+      "red": "#fb7185",
+      "orange": "#fb923c",
+      "yellow": "#fcd34d",
+      "green": "#34d399",
+      "teal": "#22d3ee",
+      "blue": "#60a5fa",
+      "purple": "#a78bfa",
+      "pink": "#f472b6",
+      "gray": "#64748b",
+      "ink": "#e8eef8"
+    },
+    "fonts": {
+      "display": {
+        "family": "Space Grotesk",
+        "weight": 700,
+        "tracking": -0.02
+      },
+      "body": {
+        "family": "Inter",
+        "weight": 400
+      },
+      "hand": {
+        "family": "Kalam",
+        "weight": 400
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "weight": 400
+      }
+    },
+    "stroke": {
+      "rough": false,
+      "width": 3,
+      "glow": 14
+    },
+    "radius": 18,
+    "tintStrength": 0.16,
+    "shadow": {
+      "color": "rgba(0,0,0,0.45)",
+      "blur": 34,
+      "y": 14
+    },
+    "enter": {
+      "shape": "pop",
+      "text": "rise",
+      "title": "rise",
+      "icon": "pop",
+      "image": "pop",
+      "list": "rise",
+      "code": "rise",
+      "chart": "grow",
+      "number": "rise",
+      "arrow": "draw",
+      "line": "draw"
+    },
+    "transition": "zoom",
+    "sfx": {
+      "shape": "pop",
+      "arrow": "whoosh",
+      "line": "whoosh",
+      "icon": "pop",
+      "image": "pop",
+      "text": null,
+      "title": null,
+      "list": "blip",
+      "number": "tick",
+      "annotate": "whoosh",
+      "chart": "whoosh",
+      "code": "type",
+      "terminal": "type",
+      "burst": "sparkle",
+      "transition": "swipe"
+    },
+    "code": {
+      "bg": "#0f172a",
+      "fg": "#e2e8f0",
+      "comment": "#64748b",
+      "keyword": "#c084fc",
+      "string": "#86efac",
+      "number": "#fbbf24",
+      "fn": "#67e8f9",
+      "punct": "#94a3b8",
+      "lineNo": "#475569",
+      "highlight": "rgba(34,211,238,0.16)",
+      "border": "#26324a"
+    },
+    "terminal": {
+      "bg": "#070b16",
+      "fg": "#e2e8f0",
+      "prompt": "#34d399",
+      "muted": "#94a3b8",
+      "bar": "#141c31"
+    },
+    "caption": {
+      "bg": "rgba(7,11,22,0.82)",
+      "fg": "#e8eef8",
+      "active": "#22d3ee"
+    }
+  },
+  "editorial": {
+    "name": "editorial",
+    "background": "paper",
+    "music": "calm",
+    "dark": false,
+    "bg": "#f5f1ea",
+    "ink": "#1c1a17",
+    "muted": "#76706a",
+    "surface": "#fffdf9",
+    "accent": "red",
+    "colors": {
+      "red": "#c2462b",
+      "orange": "#c7782a",
+      "yellow": "#b8932a",
+      "green": "#3d7a57",
+      "teal": "#2c7a74",
+      "blue": "#2f5b88",
+      "purple": "#6a4e8c",
+      "pink": "#b04870",
+      "gray": "#8a847b",
+      "ink": "#1c1a17"
+    },
+    "fonts": {
+      "display": {
+        "family": "Instrument Serif",
+        "weight": 400,
+        "tracking": -0.01
+      },
+      "body": {
+        "family": "Inter",
+        "weight": 400
+      },
+      "hand": {
+        "family": "Instrument Serif",
+        "weight": 400
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "weight": 400
+      }
+    },
+    "stroke": {
+      "rough": false,
+      "width": 2.5
+    },
+    "radius": 8,
+    "tintStrength": 0.1,
+    "shadow": {
+      "color": "rgba(40,32,20,0.10)",
+      "blur": 24,
+      "y": 8
+    },
+    "enter": {
+      "shape": "fade",
+      "text": "rise",
+      "title": "rise",
+      "icon": "fade",
+      "image": "fade",
+      "list": "rise",
+      "code": "fade",
+      "chart": "grow",
+      "number": "rise",
+      "arrow": "draw",
+      "line": "draw"
+    },
+    "transition": "fade",
+    "sfx": {
+      "shape": "pop",
+      "arrow": "whoosh",
+      "line": "whoosh",
+      "icon": "pop",
+      "image": "pop",
+      "text": null,
+      "title": null,
+      "list": "blip",
+      "number": "tick",
+      "annotate": "whoosh",
+      "chart": "whoosh",
+      "code": "type",
+      "terminal": "type",
+      "burst": "sparkle",
+      "transition": "swipe"
+    },
+    "code": {
+      "bg": "#1c1a17",
+      "fg": "#f3eee6",
+      "comment": "#8a847b",
+      "keyword": "#e0896f",
+      "string": "#a9c49a",
+      "number": "#e3b866",
+      "fn": "#9cc3dd",
+      "punct": "#bdb6aa",
+      "lineNo": "#6b655d",
+      "highlight": "rgba(227,184,102,0.16)",
+      "border": "#1c1a17"
+    },
+    "terminal": {
+      "bg": "#1c1a17",
+      "fg": "#f3eee6",
+      "prompt": "#e3b866",
+      "muted": "#a49d92",
+      "bar": "#2c2925"
+    },
+    "caption": {
+      "bg": "rgba(28,26,23,0.86)",
+      "fg": "#fffdf9",
+      "active": "#e3b866"
+    }
+  }
+}
