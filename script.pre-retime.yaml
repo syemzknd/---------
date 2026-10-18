@@ -1,0 +1,295 @@
+meta:
+  title: 打开文档前，你是不是又擦了桌子
+  duration: 60
+  fps: 30
+  resolution: 1920x1080
+  primary: "#22d3ee"
+  background: "#06080f"
+  hook_type: 扎心拷问
+  core_message: 你不是在准备开始，你是在用杂事逃避开始。
+  golden_line: 你擦的不是桌子，是那 5 分钟。
+  visual_motif: 一个青色发光点代表注意力，红点代表杂事；它从倒计时环出发，被红点反复拽离主线，最终在树状拆解回到“先写 5 分钟”节点，并在结尾回归倒计时环。
+  spectacle: 20 张红边杂事卡片同时从屏幕顶端砸落，盖住 0 字的文档框，形成红雨压顶的截屏瞬间。
+  hook_number: 3遍
+  law: 桌面洁净悖论：越整理环境，越逃避开始
+  contrast: 别人一天擦 1 次桌子写 3000 字 vs 你一天擦 20 次写 0 字
+  method_steps: [先写 5 分钟, 只开文档, 关掉杂事入口, 写烂也没关系]
+  audience: 每天打开文档前先整理桌面的写作者、学生、上班族
+  bgm_style: cinematic_epic
+  bgm:
+    song: Time
+    artist: Hans Zimmer
+    version: Inception 原声（纯器乐版）
+    segment_start: "01:23"
+    segment_end: "02:05"
+    lyric_cue: 00:45 低音提琴进入，01:23 起逐步叠加弦乐
+    instrumental: true
+    mood: 紧张、克制、逐步上扬
+    bpm: 85
+    jamendo_query: dark ambient tension pulse
+    jamendo_tags: [dark, ambient, instrumental]
+    fallback_queries: [cinematic suspense drone, minimal tech pulse]
+
+scenes:
+  - id: hook
+    start: 0
+    end: 5
+    role: 钩子
+    emotion: 焦虑
+    visual_form: 倒计时
+    transition_in: null
+    narration: 打开文档前，你又擦了 3 遍桌子。你的文档，一个字都没动。
+    highlight: [3 遍, 一个字]
+    elements:
+      - type: countdown
+        number: "3"
+        unit: 遍
+        label: 又擦了
+        from: 12
+        at: [0, 5]
+        color: "#22d3ee"
+        accent_color: "#ef4444"
+        motion: 数字从12快速滚动到3，倒计时环缺口从0扩大到240°，尾端脉冲转红
+        easing: easeOutCubic
+        focus: true
+        occupancy: 0.6
+      - type: text
+        text: 打开文档前
+        at: [0.5, 2.5]
+        color: "#ffffff"
+        size: 40
+        motion: 从右侧滑入轻微抖动
+        easing: easeOutBack
+
+  - id: empathy1
+    start: 5
+    end: 12
+    role: 共情
+    emotion: 共情
+    visual_form: 卡片矩阵
+    transition_in: 缩放推进
+    narration: 你第 3 次点开手机，水杯摆正了 5 次。空白文档还停在第 0 个字。
+    highlight: [第 3 次, 第 0 个字]
+    elements:
+      - type: cardgrid
+        groups:
+          - {label: 水杯摆正, count: 5}
+          - {label: 空白文档, count: 0}
+        at: [5, 12]
+        color: "#22d3ee"
+        accent_color: "#ef4444"
+        motion: 5张卡片从左上砸落，0字框为空并脉冲红边
+        easing: easeOutBack
+        focus: true
+        occupancy: 0.65
+      - type: counter
+        label: 点开手机
+        to: 3
+        unit: 次
+        at: [5.5, 8.5]
+        color: "#ef4444"
+        motion: 数字从0滚到3
+        easing: easeOutCubic
+
+  - id: empathy2
+    start: 12
+    end: 20
+    role: 共情
+    emotion: 共情
+    visual_form: 对比轨道
+    transition_in: 图形形变
+    narration: 你不是没时间，是任务被杂事一口一口吃掉了。
+    highlight: [杂事, 一口一口]
+    elements:
+      - type: compare
+        left: {label: 杂事, value: 8, unit: 件}
+        right: {label: 文档, value: 0, unit: 字}
+        at: [12, 20]
+        color: "#22d3ee"
+        accent_color: "#ef4444"
+        motion: 左轨道加速延伸，右轨道停滞，差距线实时拉大并转红
+        easing: easeInOutCubic
+        focus: true
+        occupancy: 0.6
+      - type: text
+        text: 一口一口
+        at: [13, 16]
+        color: "#ef4444"
+        pulse: true
+        motion: 脉冲放大
+        easing: easeOutBack
+
+  - id: analysis1
+    start: 20
+    end: 27
+    role: 拆解
+    emotion: 拆解
+    visual_form: 折线图
+    transition_in: 擦除
+    narration: 心理学称它为“桌面洁净悖论”。环境越干净，你要开始的那件难事就显得越重。整理是糖果，难事是苦药。
+    highlight: [桌面洁净悖论, 难事]
+    elements:
+      - type: linechart
+        points: [10, 20, 17, 26, 30, 45]
+        unit: 分
+        y_label: 整理耗时
+        trend: up
+        x_labels: [第1遍, 第8遍]
+        at: [20, 27]
+        color: "#22d3ee"
+        accent_color: "#ef4444"
+        motion: 折线逐段描出，端点荧光点领跑，末段转红并脉冲
+        easing: easeOutCubic
+        focus: true
+        occupancy: 0.55
+      - type: text
+        text: 难事越重
+        at: [21, 24]
+        color: "#ef4444"
+        pulse: true
+        motion: 跟随折线末端上移
+        easing: easeInOutCubic
+
+  - id: analysis2
+    start: 27
+    end: 34
+    role: 拆解
+    emotion: 拆解
+    visual_form: 卡片矩阵
+    transition_in: 图形形变
+    narration: 别人一天擦 1 次桌子，写 3000 字；你一天擦 20 次，写 0 字。差距不在时间，在启动。
+    highlight: [3000 字, 20 次]
+    elements:
+      - type: cardgrid
+        groups:
+          - {label: 别人：擦1次写3000字, count: 1}
+          - {label: 你：擦20次写0字, count: 20}
+        at: [27, 34]
+        color: "#22d3ee"
+        accent_color: "#ef4444"
+        motion: 20张红边卡片从屏幕顶端坠落，砸在0字空文档框上，1张青色卡片孤悬在左侧
+        easing: easeOutBack
+        focus: true
+        occupancy: 0.7
+        spectacle: true
+      - type: counter
+        label: 写 0 字
+        from: 3000
+        to: 0
+        at: [27.5, 31]
+        color: "#ef4444"
+        motion: 数字从3000滚到0
+        easing: easeOutCubic
+
+  - id: analysis3
+    start: 34
+    end: 40
+    role: 拆解
+    emotion: 拆解
+    visual_form: 时间轴
+    transition_in: 时间轴延伸
+    narration: 这 20 次整理，每擦一下，都在偷走你启动的那股劲。你擦的不是灰尘，是启动能量。
+    highlight: [20 次, 启动能量]
+    elements:
+      - type: timeline
+        milestones:
+          - {label: 擦第1遍}
+          - {label: 擦第10遍}
+          - {label: 擦第20遍}
+          - {label: 打开文档}
+        at: [34, 40]
+        color: "#22d3ee"
+        accent_color: "#ef4444"
+        motion: 时间轴向右延伸，前三个节点密集弹出红点，最后一个节点被向后推并标红
+        easing: easeInOutCubic
+        focus: true
+        occupancy: 0.5
+      - type: text
+        text: 启动能量
+        at: [35, 38]
+        color: "#22d3ee"
+        motion: 沿时间轴向前移动后消失
+        easing: easeInOutCubic
+
+  - id: epiphany1
+    start: 40
+    end: 48
+    role: 顿悟
+    emotion: 顿悟
+    visual_form: 树状拆解
+    transition_in: 知识树生长
+    narration: 方法只有四步。先写 5 分钟，只开文档，关掉杂事入口，写烂也没关系。第一分钟最重，后面都是惯性。
+    highlight: [先写 5 分钟, 写烂也没关系]
+    elements:
+      - type: tree
+        root: 开始写
+        nodes: [先写 5 分钟, 只开文档, 关掉杂事入口, 写烂也没关系]
+        at: [40, 48]
+        color: "#22d3ee"
+        accent_color: "#ef4444"
+        motion: 根节点亮起后，四个节点按旁白顺序逐个绽放，先写5分钟节点红色强调并脉冲
+        easing: easeOutBack
+        focus: true
+        occupancy: 0.7
+      - type: text
+        text: 先让手指动起来
+        at: [42, 46]
+        color: "#22d3ee"
+        motion: 在树旁脉冲
+        easing: easeOutCubic
+
+  - id: epiphany2
+    start: 48
+    end: 53
+    role: 顿悟
+    emotion: 顿悟
+    visual_form: 聚焦镜头
+    transition_in: 缩放推进
+    narration: 你可能会写成垃圾，但你会远远领先那个还在擦桌子的人。
+    highlight: [垃圾, 领先]
+    elements:
+      - type: spotlight
+        text: 先写 5 分钟
+        sub: 领先那个擦桌子的人
+        at: [48, 53]
+        color: "#22d3ee"
+        motion: 光圈从画面中心收缩到5分钟，周围压暗，镜头推进并轻微抖动
+        easing: easeInOutCubic
+        focus: true
+        occupancy: 0.6
+
+  - id: golden
+    start: 53
+    end: 60
+    role: 金句
+    emotion: 金句
+    visual_form: 倒计时
+    transition_in: 图形形变
+    narration: 下次再想擦第 3 遍，先写 5 分钟。
+    highlight: [第 3 遍, 5 分钟]
+    elements:
+      - type: title
+        text: 你擦的不是桌子，是那 5 分钟。
+        at: [54, 58]
+        color: "#ffffff"
+        size: 80
+        motion: 从下往上滑入，轻微回弹
+        easing: easeOutBack
+        focus: true
+        occupancy: 0.5
+      - type: countdown
+        number: "3"
+        unit: 遍
+        label: 别再擦
+        from: 3
+        at: [53, 59]
+        color: "#ef4444"
+        accent_color: "#22d3ee"
+        motion: 倒计时环从3倒数到0后闭合，尾端转青
+        easing: easeInOutCubic
+      - type: text
+        text: 下次先写 5 分钟
+        at: [55, 57]
+        color: "#22d3ee"
+        motion: 淡入
+        easing: easeOutCubic
