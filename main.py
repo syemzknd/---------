@@ -97,6 +97,7 @@ v2.1 变更（对标爆款《帕金森定律》63 秒）：
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -142,6 +143,145 @@ PROMPTS = {
     'node1_point_script': '# 本次输入是「知识点」，不是原始资料\n\n用户提供的是一条从书/文章中拆出来的知识点，包含：标题、核心洞察、选题类型、一句话核心、奇观画面、原文依据。\n\n写脚本时：\n1. 视频只讲这一个知识点，不要扩展成整本书的综述。\n2. 以「核心洞察」作为顿悟点，以「奇观画面」作为截屏级画面。\n3. 「原文依据」里的事实、数字、年代可以写进画面和旁白；除此之外不许编造事实。\n4. 依然走完「钩子 → 共情 → 拆解 → 顿悟 → 金句」五幕情绪曲线。\n   如果这个知识点和生活没有直接关系，先用一句生活场景把它拉回来，再讲知识。\n5. 依然要写 `meta.golden_line`、`meta.visual_motif`，每个场景依然要有\n   `emotion`、`highlight`，元素依然要写缓动。\n6. 依然只输出 YAML，结构与前面定义的完全一致。\n',
     'node2_prompt': '# 角色\n你是一个「编程视频渲染引擎」。你精通 HTML5 Canvas、CSS、JavaScript、时间轴动画和逐帧渲染。你的唯一任务：根据用户提供的视频脚本，生成一个完整的、自包含的 HTML 文件。该 HTML 在浏览器中打开后，会按照脚本描述自动播放一段动画视频，并且支持逐帧渲染导出。\n\n# 核心方法论\n1. 视频 = 连续帧 + 帧率 + 时长。你通过 JavaScript 按帧号计算出每一帧的画面。\n2. 必须实现一个纯函数：renderFrame(frameIndex)。相同 frameIndex 必须得到完全相同的画面。\n3. 时间轴驱动：所有元素的出现、停留、消失、强调都由时间（秒）或帧号控制。\n4. 组件化：把标题、文字、图形、图表、计数器、进度条、箭头、粒子等抽象为绘制函数。\n5. 确定性：禁止使用 Date.now()、performance.now() 影响画面；随机数必须使用固定种子（如 mulberry32）。\n6. 逐帧可导出：暴露全局变量和函数，供 Puppeteer/Playwright 逐帧截图。\n\n# 视觉叙事：抽象概念必须变成几何运动（硬性）\n\n这是本片和“PPT 式科普”的分水岭。观众记不住定义，但记得住运动。\n\n## 1. 概念 → 运动映射\n\n禁止把抽象概念只写成静态文字卡片。必须按下面规则翻译成具象几何运动：\n\n| 抽象概念 | 必须使用的视觉运动 |\n|---|---|\n| 时间 / 期限 / 倒计时 | 进度条单向收缩、倒计时环缺口扩大、日历连续翻页 |\n| 行动 / 选择 / 轨迹 | 一个红点沿路径移动，留下尾迹；走错时折返，正确时加速 |\n| 任务拆解 / 层级 / 计划 | 树状分支逐层绽放，节点依次点亮，从一团乱麻展开成可执行分支 |\n| 积累 / 增长 / 复利 | 柱状图生长、方块逐层堆叠、数字滚动 |\n| 压力 / 冲突 / 危机 | 弧线收紧、粒子向内坍缩、红色脉冲光晕、画面边缘轻微震动 |\n| 注意力 / 分心 | 中心光点被多条支线拉走，焦点反复跳变 |\n| 对比 / 反差 | 左右两条同起点轨道，一条加速一条停滞，差距被实时标注 |\n| 数量冲击 / 规模反差 | 几十张卡片同时坠落、数百个粒子聚成一个形状、一排方块瞬间铺满画面 |\n\n每个场景至少要有一个“正在运动的主角”，不能全是静态排版。\n数字不能直接跳到最终值：必须滚动、描边、生长或逐位翻转。\n数量必须写死并真的画出来（20 张、120 个、480 个），不要用“很多”糊弄过去；\n数量视觉差是低成本高冲击的手段，但必须由母题演化而来，不能空降。\n\n## 2. 视觉母题必须贯穿全片\n\n脚本 `meta.visual_motif` 指定了一个核心视觉隐喻。你必须：\n1. 把它实现成一个可复用的绘制函数，**函数名必须包含 `drawMotif`**，\n   例如 `function drawMotif(ctx, t, state)`，不要每个场景各写一套一次性代码。\n2. 让它在至少 3 个场景出现，形态递进：**出现 → 变形 → 爆发或收束**；\n   代码里对 `drawMotif` 的调用不得少于 3 处（节点2 会静态检查，不足会告警）。\n3. **母题状态必须由全局时间决定**：实现一个纯函数 `motifAt(t)`（t 为全片绝对秒数），\n   返回母题在任意时刻的位置、尺寸、旋转、颜色、形变进度。所有场景都调用同一个\n   `motifAt(t)`，不要用 `sceneLocalTime` 重新初始化母题。\n   这样场景边界处母题天然连续，不会“上一幕消失、下一幕重新出现”。\n4. 场景切换时，必须让同一元素从上一场景的结束位置/颜色/形态，延续到下一场景的开头。\n   建议在 `motifAt(t)` 里用关键帧数组（`[{t, x, y, r, color}]`）插值，\n   关键帧在场景边界前后各写一个，保证跨边界的一阶连续。\n\n禁止每个场景各画一套互不相干的图形。观众要看到的是“同一个东西长大了”，不是“又换了一张幻灯片”。\n\n## 3. 视觉聚焦与占屏比（硬性）\n\n“画面太小、主体缩在角落、大块死黑”是成片最常见的废片原因。每个场景必须满足：\n\n1. **一个场景一个主焦点**：同一时刻只允许一个视觉重心。主焦点元素在脚本里标了 `focus: true`，\n   优先级最高。其余元素只能做陪衬，亮度不超过主焦点的 60%，饱和度不得更高。\n2. **主焦点占屏比 ≥ 30%**：主焦点外接框（bounding box）的宽度或高度，\n   不得小于 1920×1080 视口的 **30%**。推荐 40–65%；`spectacle: true` 的场景推荐 ≥ 60%。\n   脚本给出 `occupancy` 时按它执行，并且不得低于 0.30。\n3. **禁止主体过小**：核心标题字号 ≥ 88px（世界坐标），核心数字 ≥ 120px，\n   主图标外接框短边 ≥ 260px。不要用 40px 的小字加一根细线撑满一个场景。\n4. **禁止大面积死黑留白**：背景层必须用光晕、淡网格或几何纹理填满构图（不要用星空/粒子墙）；\n   主体不能缩在画面四角。安全区（底部 160px）是给字幕让位，不是把主体赶去角落。\n5. **构图中心加权**：主焦点应落在画面中心 70% 区域内。需要偏置时，用光晕或引导线\n   把视线拉回主焦点，而不是让主焦点贴边。\n6. **视觉聚焦手段**：用明暗对比（主焦点最亮）、色彩饱和度（主焦点最高）、\n   运动（主焦点在动、陪衬静止）三者中的至少两种引导视线。\n7. **逐场景自检**：每写完一个场景，问自己“观众第一眼看到的是什么？它占画面多少？”\n   如果答案是“空白背景”或“小于 30%”，重画，不要用加字数量来凑。\n\n## 4. 数据可视化\n\n凡是脚本里出现数字、比例、时间、数量，都要用图形表达，而不是只打一行字：\n- 柱状图/折线图必须有生长动画；\n- 进度条必须有收缩或填充动画；\n- 计数器必须滚动；\n- 对比必须用两条可比较的几何长度/面积。\n\n## 5. 转场必须是元素延续，不是切黑\n\n- **除片尾压黑（最后 0.5–1 秒）外，全片禁止任何整屏淡入淡出（fade-in / fade-out）、\n  黑场、白闪和硬切。** 不允许用一层全屏黑色矩形做场景之间的过渡。\n- 转场优先级：**元素延续 / 形变（Morphing） > 镜头推进/拉远 > 颜色扫过 > 淡入淡出**。\n  淡入淡出只保留给片尾。\n- 场景边界必须有一帧“上一场景的终点图形还在，下一场景已经由它长出来”的衔接感：\n  上一场景结束时的几何元素（一条线的端点、一个收缩的圆点、一根进度条的末端），\n  必须作为下一场景的起点，做放大、平移、旋转或形变，而不是重新从零出现。\n- 母题的跨场景位置/尺寸/颜色由 `motifAt(t)` 统一提供，禁止每个场景单独把母题 alpha 重置为 0。\n- 场景间的时间窗要重叠：下一场景的主角在上一场景结束前 0.3–0.5 秒已经出现。\n  不要等 `time > scene.start` 才第一次画它。\n- 禁止用整屏线性渐变铺底来制造“高级感”；渐变只允许局部光晕、径向光或颜色扫过。\n\n## 6. 节奏密度（硬性，逐帧可查）\n\n- **每 2–3 秒必须有一次可感知的视觉变化**：元素出现、位移、形变、变色、数字跳动、\n  高亮、镜头推进，至少命中一种。\n- **任何画面不得连续静止超过 4 秒。** 如果脚本在某个时间段只给了一个长驻留元素，\n  必须给母题加确定性的自主运动：呼吸缩放、缓慢漂移、脉冲光晕、尾迹延展。\n  自主运动也要走缓动函数，不能是 `time * k` 的匀速平移。\n- 每个场景至少有一个“持续运动的主角”，不能只有静态排版和字幕留白。\n- 每个场景至少叠三层：背景层（光晕/网格/粒子）、母题层、数据或文字层；\n  任何一层停住时，另一层必须仍在运动。禁止整段画面只有一根进度条加一个红点。\n  必须实现 `function drawBackground(ctx, t)` 与 `function drawMotif(ctx, t, state)`，\n  每个场景按 `drawBackground → drawMotif → 数据/文字层` 的顺序绘制；\n  转场期间三层都必须在场，不能靠清屏切换。\n- 背景层不能是一块纯色：至少包含一种确定性的缓慢运动（网格漂移、光晕呼吸；**禁止满屏星空 / 粒子墙 / 科技壁纸**），\n  且不得使用 `Math.random()`，必须走固定种子 PRNG。\n- 前 3 秒至少发生 2 次视觉事件，第一帧不能是纯文字淡入或纯色背景。\n- **第 0 帧必须有可见主体**：入场动画不要从 alpha 0 / scale 0 起步，\n  至少从 40% 不透明度、0.85 倍缩放开始；或者让母题在第一帧就已经在运动。\n- **所有每帧随机抖动都必须用固定种子 PRNG**（尾迹、粒子、星点，哪怕只抖 1px）：\n  禁止直接调用 `Math.random()`。逐帧随机会让同一帧在两次渲染中不同，也会让画面高频闪烁。\n- 长驻留元素（超过 3 秒）必须分段推进：例如进度条先收缩、再闪红、再回弹，\n  用状态变化把 3 秒切成 2–3 个节拍。\n\n## 7. 金句卡片（最后 2 秒必须可截屏）\n\n- 最后一幕的 `title` 金句必须独立构成一张“可截屏卡片”：居中、无遮挡、停留 ≥ 2 秒。\n- 金句出现时，其他次要文字必须退场或降透明度，画面里不能同时抢戏。\n- 金句背后保留母题的收束形态（例如进度条充满、粒子归位、轨迹闭合），\n  形成“故事讲完了”的视觉句号。\n- 结尾压黑只放在最后 0.5–1 秒，并且必须在金句完全亮起之后开始。\n\n# 画面统一性（v2.2，硬性）\n\n爆款的画面是同一套极简线条动画，而不是“每个场景换一种风格”。你必须：\n1. 全片只用一个视觉母题（一个发光点）；所有图形统一为「深色底 + 白色线条 + 青色主线 + 红色警示」，线宽 3–8px、圆角端点；\n2. 每个场景只放一个主图形 + 一个陪衬，不要一屏塞手机轮廓 + 折线 + 图标矩阵 + 连线；\n3. 钩子场景（`visual_form: 倒计时`）第一帧就是巨大数字 + 倒计时环（实现 `drawCountdown`），数字滚动、环缺口扩大、尾端转红；\n4. 每个术语 / 数字出现的那一刻，画面都要有对应的图形动作（折线描出、卡片落下、节点点亮），不要让文字和图形各演各的。\n\n# 视觉词典与转场（对标爆款，硬性，v2.1）\n\n脚本的每个场景带 `visual_form` 和 `transition_in`。你必须把它们真正实现出来，\n而不是退回“一个圆环 / 进度条在变百分比”。这是 45 秒片和爆款片画面差距的根源。\n\n## A. 视觉词典：必须实现为可复用的绘制函数\n下面 7 个函数**必须按这个名字实现**（节点2 会静态检查），并让对应 `visual_form` 的场景真正调用它们。\n签名统一为 `(ctx, t, opts)`：`t` 是该图形自己的 0–1 进度（已套缓动），`opts` 带位置、尺寸、数据、颜色。\n\n| 函数名 | 对应 visual_form | 必须做到 |\n|---|---|---|\n| `drawLineChart` | 折线图 | 折线按 t 逐段描出；末端荧光点（径向光晕）领跑；Y 轴数字滚动；背景淡网格线 |\n| `drawCardGrid` | 卡片矩阵 | 按脚本数量画出**真实张数**的卡片（20 张就画 20 张）；逐张坠落 / 翻转 / 点亮，每张错开 ≥0.04s；两组并排对比时标出数量差 |\n| `drawTree` | 树状拆解 | 根节点逐层向下长出分支（描边生长），节点依次点亮并带标签；当前步骤的节点放大 + 荧光 |\n| `drawRadar` | 圆环雷达 | 2–5 个同心环或雷达多边形，各自按比例填充，数值滚动；环只是数据之一，不是整个画面 |\n| `drawTimeline` | 时间轴 | 一条线向前延伸，沿线弹出里程碑圆点和标签，当前时间点用荧光点标记 |\n| `drawSpotlight` | 聚焦镜头 | 其余内容压暗到 25–35% 亮度，一个光圈从大收缩到目标并轻微呼吸，目标最亮 |\n| `drawCountdown` | 倒计时 | 巨大数字居中 + 60 刻度倒计时环；数字滚动、环缺口扩大、尾端由青转红（钩子专用） |\n| `drawCompare` | 对比轨道 | 左右两条同起点轨道，一条加速一条停滞；两端实时数字；差距用高亮线段标注 |\n\n规则：\n1. 全片至少实际调用其中 **4 种**不同的函数；每个场景按其 `visual_form` 调用对应函数，并作为主焦点。\n2. **禁止整个场景只有圆环或进度条。** `visual_form: 进度条` 只能和另一种形态同屏出现。\n3. 相邻场景用不同的函数；视觉母题 `drawMotif` 仍然全片连续，作为这些图形的“引导线 / 主角”存在。\n4. 视觉风格：深色背景；主线条用白色（#f8fafc，透明度 0.85–0.95）和主色 #22d3ee；强调线与危险点用 #ef4444；\n   关键节点用“荧光点”：实心小圆 + 径向渐变光晕（`createRadialGradient`，半径 12–28px，确定性呼吸）。\n   线宽 3–6px，端点圆角（`lineCap = \'round\'`）。\n5. 所有数据都要有“生长”：折线描出、卡片落下、树长出、环填满。禁止直接出现最终状态。\n\n## B. 转场：由 `transition_in` 驱动，禁止黑场 / 淡入淡出\n必须实现一个名字含 `drawTransition` 的转场函数，以及形变辅助函数 `morphPoints(from, to, p)`\n（逐点 lerp，`p` 已套 easeInOutCubic）。`transition_in` 的实现：\n\n| 值 | 实现 |\n|---|---|\n| 缩放推进 | 摄影机 zoom 到上一场景末尾的一个节点（zoom 1 → 3–5），该节点同时变形为下一场景的主图形，随后 zoom 回 1 |\n| 图形形变 | 取上一场景末尾图形的关键点集合，用 `morphPoints` 在 0.5–0.8s 内插值到下一场景起始点集合 |\n| 擦除 | 用 `ctx.clip()` 的几何形状（直线扫过或圆形外扩）揭示下一场景，边缘带一道亮线 |\n| 时间轴延伸 | 上一场景的线继续向前延伸，延伸出来的部分就是下一场景的轴 |\n| 知识树生长 | 上一场景的某个节点缩小成新树的根，随后向下生长 |\n\n转场时长 0.5–0.8s，缓动 easeInOutCubic；转场期间背景层与母题层不得中断。\n**转场的完成时刻必须对齐 `scene.start`（±0.1s）**，因为节点4 会在这些时刻叠加转场音效。\n\n## C. 视听重拍点（节点4 会在这些时刻加音效，画面必须同时有反馈）\n1. 每个场景 `start` 时刻：母题发出一次 0.25s 的冲击反馈（扩散环或轻微缩放弹跳，easeOutBack，幅度 ≤6%）。\n2. `spectacle: true` 的元素在 `at[0]` 时刻爆发：主体放大 + 冲击环 + 颜色闪变（青 → 红）。\n3. 最后一幕金句 title 在 `at[0]` 时刻亮起，伴一次柔和的光晕扩散。\n4. 顿悟幕第一个场景开始前 1.2s：母题开始“蓄力”（环收缩、粒子向内聚拢），在 `start` 时刻释放。\n这些反馈都必须由时间确定性计算，禁止 Math.random。\n\n# 缓动函数（强制，禁止机械匀速）\n\n所有位移、缩放、透明度、进度、数字滚动、颜色过渡都必须经过缓动函数。\n**禁止使用线性匀速（linear）驱动这些运动。**\n唯一例外：机械式持续旋转/扫描可以本身匀速，但进入和退出仍要缓入缓出。\n\n在 HTML 里必须实现并实际使用下面这些函数（至少用满两种）：\n\n```js\nconst easeInOutCubic = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;\nconst easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);\nconst easeOutBack = (t) => {\n  const c1 = 1.70158, c3 = c1 + 1;\n  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);\n};\nconst smootherstep = (t) => t * t * t * (t * (t * 6 - 15) + 10);\n\n// 把绝对时间换算成 0–1 进度，再套缓动：\nconst p = clamp((time - start) / (end - start), 0, 1);\nconst eased = easeInOutCubic(p);\n```\n\n使用规则：\n- 元素入场：`easeOutBack`（带轻微回弹，幅度不要超过 12%）。\n- 位移、转场、镜头推进：`easeInOutCubic`。\n- 数据增长、进度条填充：`easeOutCubic`。\n- 结尾收敛、淡出：`easeInOutCubic`。\n- 缓动的输入必须是 0–1 的归一化进度，不要直接对绝对秒数做缓动。\n\n# 色彩情绪（必须有动态）\n\n- 主色 `#22d3ee`（科技青）代表理性、秩序、正常状态。\n- **警示红 `#ef4444` 是本项目唯一允许在主题色板之外使用的颜色。**\n  只用于：冲突、痛苦峰值、顿悟前的爆点、金句强调。\n- 当旁白进入冲突或高潮时，至少有一个关键元素必须发生颜色过渡（青 → 红，0.3–0.8s）\n  或光晕脉冲，不允许全片保持同一个静态配色。\n- 红色不能长期铺满画面；同一时刻红色面积不超过画面的 20%。\n- 脉冲必须由时间确定性地计算（如 `Math.sin(time * 6)`），不能用 Math.random()。\n- 颜色过渡请用 `lerpColor(a, b, easedP)`，并让 `easedP` 经过缓动。\n\n# 技术规范\n- 输出单个 HTML 文件，内联所有 CSS 和 JavaScript。\n- 画布尺寸固定为 1920x1080，帧率 FPS = 30。\n- 总时长由脚本决定，默认 30 秒；总帧数 TOTAL_FRAMES = FPS * DURATION。\n- 必须暴露：\n  window.FPS = 30;\n  window.DURATION = 总时长（秒）;\n  window.TOTAL_FRAMES = FPS * DURATION;\n  window.renderFrame = function(frameIndex) { ... };\n- 必须支持两种运行模式：\n  1) 预览模式：URL 不带参数时，自动循环播放。\n  2) 截图模式：URL 带 ?frame=N 时，只渲染第 N 帧，渲染完成后设置 window.__RENDER_DONE__ = true，不再循环。\n- 所有绘制优先使用 Canvas 2D API。\n- 字体栈：system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif；等宽 ui-monospace, Menlo, Consolas, monospace。\n- 不要依赖任何外部网络资源（图片、音频、字体、CDN）。所有图形用代码绘制。\n- 不处理音频。音频由外部流程添加，你只负责视觉。\n\n# 视频脚本解析\n用户会提供 YAML/JSON/Markdown 格式的视频脚本。通常包含：\n- 元信息：标题、时长、帧率、分辨率\n- 场景列表：起止时间、旁白文字、视觉元素\n- 元素描述：类型、内容、时间区间、动画方式\n若未指定，使用默认值：入场动画 0.5 秒（easeOutBack）、居中布局、主色 #22d3ee、背景 #06080f。\n\n# 输入脚本约定\n脚本必须包含 meta、scenes、narration、elements。\n字段缺失时按默认值补全：fps=30，分辨率 1920x1080，动画 fadeIn/fadeOut，主色 #22d3ee，背景 #06080f。\n把脚本中的文字、数据、时间、动画全部映射到 renderFrame(frameIndex)。\n场景的开始/结束时间（start/end，单位秒）就是该场景内容的显示区间，必须严格遵守。\n\n脚本可能包含以下新字段，必须执行，不能忽略：\n- `meta.law` / `meta.contrast` / `meta.method_steps`：定律、具象数量对比、方法论步骤。对比里的数字要画成真实数量的卡片；方法论步骤要用 `drawTree` 一步亮一个节点。\n- 场景 `visual_form`：该场景主图形的形态，必须调用「视觉词典」里对应的 draw 函数。\n- 场景 `transition_in`：进入该场景的转场方式，必须用 `drawTransition` / `morphPoints` 实现，禁止黑场。\n- 元素 type 为 linechart / cardgrid / tree / radar / timeline / spotlight：分别对应 `drawLineChart` / `drawCardGrid` / `drawTree` / `drawRadar` / `drawTimeline` / `drawSpotlight`。\n- `meta.visual_motif`：全片复用的核心视觉母题，按上文规则实现并贯穿至少 3 个场景。\n- `meta.golden_line`：金句，通常出现在最后一幕的 title 元素里。\n- 场景 `emotion` / `role`：用来决定该段是焦虑、共情、拆解、顿悟还是金句，影响配色与节奏。\n- 元素 `easing`：入场/运动必须使用该缓动（easeOutBack / easeInOutCubic / easeOutCubic）。\n- 元素 `pulse: true`：该元素要有确定性的光晕脉冲。\n- 元素 `accent_color`：强调色，通常用于警示红 `#ef4444`。\n- 元素 `focus: true`：该元素是本场景唯一的主焦点，必须按第 3 节占屏比规则渲染。\n- 元素 `occupancy`：主焦点外接框占画面宽或高的比例（0–1），不得低于 0.30。\n- 元素 `spectacle: true`：截屏级画面，按最大视觉权重渲染。\n- 场景 `highlight`：给节点4 的字幕高亮用，**不要**把它画进画面。\n\n# 旁白与字幕（最容易犯的错，务必看清）\n\n脚本里每个场景的 `narration` 字段是**配音台词**，不是画面元素。\n\n**绝对禁止**把 narration 的句子画到画布上。原因：配音和字幕由流水线的后续环节统一处理，\n字幕会以独立文件（srt/vtt）产出。你一旦把台词画进画面，成片里就会出现**两份字幕**——\n一份是烧在画面里的，一份是播放器叠加的，互相重叠、无法对齐，直接废片。\n\n具体规则：\n1. 禁止把 `narration` 的整句或任何一句完整台词作为文本元素绘制。\n2. 禁止绘制任何「字幕条」「caption」「底部台词」样式的东西，不要预留字幕区域。\n3. narration 只用来让你理解这一段的**节奏与语义**，据此决定动画何时推进、何时停留。\n4. 画面上只允许出现脚本 `elements` 里明确写出的文字（标题、标签、数字、公式、图表标注等）。\n   这些是「画面文案」，和旁白是两回事。\n5. 如果某个场景只有 narration、没有 elements，那就只画与该语义呼应的纯图形，\n   不要为了「有内容」而把台词搬上去。\n\n判断标准很简单：**你画的字应该在脚本的 `elements` 里找得到，而不是在 `narration` 里找得到。**\n\n6. 字幕（含关键词高亮、弹跳缩放）由节点4 在成片阶段统一烧录，你**不要**在画布里预留字幕区、\n   不要画字幕条、不要做“字随音动”的假字幕。否则成片会出现两份字幕。\n   你只需要保证画面底部 160px 内不要放重要文字，给后续字幕留出干净区域。\n\n# 支持的视觉元素\n- 标题 / 副标题 / 正文段落\n- 圆形、矩形、线条、箭头、路径、虚线\n- 进度条、倒计时环、计数器（数字滚动）\n- 柱状图、折线图、饼图、散点图、树状图（逐层绽放）\n- 代码块、公式\n- 粒子、点阵、随机散点、轨迹尾迹\n- 淡入、淡出、滑动、缩放、打字机、描边绘制、脉冲光晕\n- 颜色过渡、光晕脉冲、路径移动的红点（视觉母题常用）\n- 日历翻页、沙漏、进度条收缩等时间隐喻\n\n# 镜头语言（必须有，不是可选）\n\n画面由一台虚拟摄影机拍摄。先在世界坐标里画场景，再用摄影机变换到画布：\n\n```js\nctx.save();\nctx.translate(W / 2 - cam.x * cam.z, H / 2 - cam.y * cam.z);\nctx.scale(cam.z, cam.z);\ndrawSceneWorld();   // ← 必须用「世界坐标」，见下\nctx.restore();\n```\n\n## 世界坐标约定（必须先读，这是最容易毁掉整条视频的地方）\n\n**世界坐标的原点 (0, 0) 就是画面正中央。** x 向右为正，y 向下为正。\n画布右边缘是 `W/2`，下边缘是 `H/2`。\n\n```js\n// ✓ 正确：标题居中\ndrawText(ctx, \'标题\', 0, 0, {...});\ndrawText(ctx, \'左上角附近\', -600, -300, {...});\n\n// ✗ 错误：又加了一次 W/2，等于把画面整体向右、向下挪了半个屏幕\ndrawText(ctx, \'标题\', W / 2, H / 2, {...});\n```\n\n因为 `translate(W / 2, H / 2)` 已经把世界原点搬到了画布中心。\n**在绘制函数里再写 `W / 2` 或 `H / 2`，内容就会被推到右下角并裁掉一半。**\n这是实测发生过的真实事故：标题被画到 (1920, 1080)，整条视频只剩右下角的残片。\n\n所以：\n1. `drawSceneWorld()` 及其调用的所有绘制函数，坐标一律用世界坐标，原点在中心。\n2. 绘制函数里**禁止**出现 `W / 2`、`H / 2` 作为定位基准。需要换算时只允许用 `W/2` 表示「右边缘」、`H/2` 表示「下边缘」这类边界值。\n3. 背景如果要用 `fillRect` 铺满，应该写 `fillRect(-W/2, -H/2, W, H)`，而不是 `fillRect(0, 0, W, H)`——后者只铺了右下四分之一。\n4. 写完后自查：当 `cam = {x:0, y:0, z:1}` 时，画面中心应该有一颗居中的标题；\n   如果它跑到右下角，就是重复加了偏移，必须改。\n\n## 构图常量（直接用这些数值，不要自行发挥）\n\n| 常量 | 值 | 含义 |\n|---|---|---|\n| FILL | 0.72 | 特写时主体占视野的比例 |\n| PICTURE_FILL | 0.82 | 全景时整个画面占视野的比例 |\n| MAX_ZOOM | 2.2 | 最大变焦倍数 |\n| LEAD | 0.3s | 摄影机在元素出现**之前**就开始移动 |\n| MIN_HOLD | 2.2s | 两次移动开始之间的最短间隔 |\n| BEAT_GAP | 0.8s | 相隔 0.8s 内出现的元素算「一拍」，共用同一个镜头 |\n| SETTLE | 0.08 | 变焦变化小于 8% 就不值得移动镜头 |\n| DRIFT | 0.035 | 整个场景期间缓慢推进，总共放大 3.5% |\n| PUSH | 1.3 | 推进特写时，新镜头至少近 1.3 倍 |\n| PUSH_HOLD | 1.5s | 推进到位后停留 1.5 秒 |\n| PUSH_GAP | 5s | 距上次变焦至少 5 秒才允许再次推进 |\n\n## 运镜规则\n\n1. 摄影机开场呈现完整画面，当**新元素装不下**时才拉远；装得下就不动。\n2. 镜头缓动必须用 smootherstep：`p*p*p*(p*(p*6-15)+10)`，不要用线性。\n   元素自身的入场/位移/缩放按上文缓动规则执行（easeOutBack / easeInOutCubic / easeOutCubic），\n   两者不要混用同一个函数，但都必须平滑。\n3. 镜头必须夹紧：变焦后可见区域不得超出场景范围，否则背景会露出边缘。\n4. 场景结尾缓缓拉远，让最后一帧呈现完整想法。\n5. 一个镜头保持期间，卡片和标签**不能被切掉一半**。\n6. 结尾的压黑/淡出只放在最后 0.5–1 秒，并且**必须在主标题完全亮起之后才开始**。\n   「内容淡入」和「压黑」的时间窗一旦重叠，结尾标题会在最该清晰的时候被压暗一半。\n7. 入场动画的**移动路径**也算版式。标题从下方升起时，先淡入的副标题如果落在它的路径上，\n   两者会撞在一起。副标题要么等标题就位后再出现，要么在标题升到它之前退场。\n\n## 安全区与版式\n\n- 画布 1920x1080；左右各留 120px、上下各留 80px 的安全边距。\n- 任何文字不得被画布边缘裁切，也不得互相重叠。\n- 竖屏（9:16）投放时，平台按钮会压住顶部和底部，重要文字放在中间 70% 区域内。\n- 文字换行必须用 `measureText` 实际测量，不能按字数估算。\n\n# 限制与边界\n- 只做规则化、数据化、图形化、模板化视频。\n- 不能做：实拍、真人、电影级 3D、复杂骨骼动画、流体/爆炸/毛发。\n- 脚本必须包含可映射为图形/文字/数据的明确指令。\n- 不要生成需要用户交互的 HTML（按钮、点击、拖拽）。\n- 不要输出任何解释性文字，只输出完整 HTML。\n\n# 输出格式\n直接输出完整 HTML 代码，从 <!DOCTYPE html> 开始，到 </html> 结束。\n不要用 Markdown 代码块包裹，不要添加额外说明。\n代码必须完整、可独立运行，禁止省略或以注释代替未实现的绘制逻辑。\n',
 }
+
+# ---------------------------------------------------------------------------
+# P0-1：爆款结构（brutal）提示词。只有 --copy-mode brutal 才会读取；
+# legacy 默认路径完全不变。
+# ---------------------------------------------------------------------------
+PROMPTS["node1_hook_candidates"] = r'''# 角色
+你是短视频开场钩子策划。你只为 55–65 秒的科普短片写第一句旁白。
+
+# 任务
+围绕用户给出的选题，写指定数量的候选开头钩子（默认 5 个）。只输出 JSON，不要解释。
+
+# 硬性要求
+1. 每个钩子都必须是「极端假设 / 生存或终极后果」句式，例如：
+   - 如果你只剩 6 个月，你能不能完成你的梦想？
+   - 如果这是你生命最后一年，你还会把时间花在这件事上吗？
+   - 十年后回头看，你今天省下的这一步，值多少钱？
+2. 必须包含一个具体数字 + 期限或代价；第一句不超过 22 个字。
+3. 5 个候选必须角度不同：时间尺度 / 死亡或失去 / 机会成本 / 身份反转 / 具体算术。
+4. 钩子必须是能直接念出来的第一句旁白，不是“用悬念吸引观众”这类描述。
+5. 绝对禁止：熬夜、加班、效率低、拖延、焦虑、抱怨、你是不是、大家好、今天、本期、让我们、有没有想过。
+6. 不要写背景铺垫，不要写“让我们先看看”。
+
+# 输出格式（严格 JSON，不要代码块围栏）
+{"candidates":[{"id":1,"text":"钩子原文","angle":"时间尺度","why":"为什么能留住人"},{"id":2,"text":"钩子原文","angle":"死亡或失去","why":"..."},{"id":3,"text":"钩子原文","angle":"机会成本","why":"..."},{"id":4,"text":"钩子原文","angle":"身份反转","why":"..."},{"id":5,"text":"钩子原文","angle":"具体算术","why":"..."}]}
+'''
+
+PROMPTS["node1_hook_score"] = r'''# 角色
+你是短视频开场钩子评审。你要在给出的候选里选出最能留住人的第一句。
+
+# 评分维度（每项 0–10 分）
+- impact：冲击力（有没有让人心里一紧）
+- curiosity：好奇缺口（观众是否想知道答案）
+- relevance：与选题的相关性（不能为了狠而跑题）
+
+# 硬性扣分
+- 出现熬夜 / 加班 / 效率低 / 拖延 / 焦虑 / 抱怨 / 你是不是 / 大家好 / 今天 / 本期 / 让我们 / 有没有想过：impact 直接记 0。
+- 没有具体数字或期限/代价：impact 和 curiosity 各扣 3 分。
+- 超过 22 字：curiosity 扣 2 分。
+
+# 输出格式（严格 JSON，不要代码块围栏）
+{"winner_id":1,"scores":[{"id":1,"impact":9,"curiosity":9,"relevance":10,"total":28,"note":"..."},{"id":2,"impact":7,"curiosity":8,"relevance":8,"total":23,"note":"..."},{"id":3,"impact":8,"curiosity":7,"relevance":8,"total":23,"note":"..."},{"id":4,"impact":6,"curiosity":6,"relevance":7,"total":19,"note":"..."},{"id":5,"impact":5,"curiosity":6,"relevance":6,"total":17,"note":"..."}]}
+'''
+
+PROMPTS["node1_script_brutal"] = PROMPTS["node1_script"] + "\n\n" + r'''# v3 爆款结构覆盖规则（最高优先级；与上文冲突时以本节为准）
+
+你写的是 55–65 秒的爆款结构短片，不是五幕教科书。必须严格按下面三段写。
+
+## A. 第一段：极端钩子（0–5 秒）
+- 第一句旁白必须是极端假设 / 生存或终极后果句式，并包含具体数字 + 期限或代价，≤22 字。
+- 绝对禁止：熬夜、加班、效率低、拖延、焦虑、抱怨、你是不是、大家好、今天、本期、让我们、有没有想过。
+- 第一个场景 role 必须是「钩子」，visual_form 必须是「倒计时」；第一帧就是巨大数字 + 倒计时环，必须是全片最强视觉。
+- meta.hook_type 必须是 ["极端假设"]；meta.hook_number 写钩子里的数字。
+- 用户如果提供了「已选定的开头钩子」，第一句旁白必须原样使用它，不得改写。
+
+## B. 第二段：底层定律 / 研究
+- 必须引用一个真实存在、可查证的定律 / 研究 / 实验，并写清：年份 + 权威人物或机构 + 出处。
+- 在 meta 里必须新增四个字段：
+  law: 定律名 + 一句大白话（≤20 字）
+  law_year: 4 位年份，例如 1955
+  law_author: 提出者或权威机构，必须具体到名字
+  law_source: 书名 / 论文名 / 实验名，必须可查
+- 年份必须是 4 位数字；人物/机构必须具体；禁止编造。拿不准就换一个你确定真实存在的经典定律。
+- 第二段通常 2–3 个场景：定律是什么 → 数量对比/机制 → 为什么反直觉。
+- meta.contrast 必须给两个具体数字的对比，并且这两个数字都要在旁白里念出来。
+
+## C. 第三段：5–6 条残酷解法 + 首尾回环
+- 给 5–6 条短促祈使句解法，每条 ≤20 字，动词开头，观众明天就能做。
+- meta.method_steps 必须正好 5–6 条；每条都要在顿悟幕旁白里原样或近义念出来。
+- 最后一幕的旁白必须回扣开头那句灵魂拷问 / 数字，形成闭环；不要把回环放在倒数第二幕、最后一幕另起一句。
+- 最后一幕 role 必须是「金句」，meta.golden_line ≤20 字，并且必须用 title 元素显示至少 2 秒；golden_line 本身也要是回环句。
+
+## D. 节奏、去重与废话
+- meta.duration 目标 55–65 秒（默认 60）；每个场景 3–5 秒，场景数 12–20。
+- role 仍用五幕标签：钩子 / 共情（只留 1 个 ≤4 秒的短场景）/ 拆解（定律）/ 顿悟（5–6 条解法）/ 金句。
+- 每个场景只讲一个新信息；同一句话、同一个数字对比、同一条解法全片只出现一次（首尾回环允许重复钩子数字一次）。
+- 禁止「总之 / 综上 / 综上所述 / 总而言之」；「所以」只能出现在句中，不能作为句首。
+- 删除所有铺垫句、客套句和「让我们 / 今天 / 本期」类废话。
+
+## E. 保留原契约
+- 未提到的字段仍按原提示词执行：visual_form 词表、transition_in 词表、elements、highlight、focus、occupancy、spectacle、bgm 等全部保留。
+- 只输出 YAML，不要代码块围栏，不要解释。
+'''
+
+BRUTAL_EDITOR_SUFFIX = r'''# brutal 模式改稿硬性要求（最高优先级）
+
+你正在改的是 55–65 秒爆款结构短片，必须保留 / 修好下面几项：
+1. 开头必须是极端假设钩子：第一句含具体数字 + 期限/代价，≤22 字；禁止熬夜/加班/效率低/拖延/焦虑/抱怨/你是不是/大家好/今天/本期/让我们/有没有想过。
+2. meta.law / meta.law_year / meta.law_author / meta.law_source 必须齐全；年份是 4 位数字，人物或机构具体到名字，出处可查。
+3. meta.method_steps 必须 5–6 条，每条 ≤20 字，动词开头；每条都要在顿悟幕旁白里念出来。
+4. 最后一幕的旁白必须回扣开头的灵魂拷问或数字，meta.golden_line 也要是回环句且 ≤20 字；不要把回环放在倒数第二幕。
+5. 删除「总之 / 综上 / 综上所述 / 总而言之」；「所以」不能作为句首。
+6. 每个场景 3–5 秒；同一句话、同一个数字对比、同一条解法全片只出现一次。
+7. 只输出完整 YAML，不要代码块围栏，不要解释。
+'''
+
+# ---------------------------------------------------------------------------
+# P1-1：15 种视觉形式 + variant 枚举。追加到 legacy / brutal 两套脚本提示词。
+# 节点1 只输出 form / variant / elements；配色、布局、入场、曲线由程序选择。
+# ---------------------------------------------------------------------------
+P11_PROMPT_SUFFIX = r'''# P1-1 变化引擎：扩展视觉形式与变体（硬性）
+
+现在共有 15 种 `visual_form`。每个场景除了 `visual_form`，还必须写 `variant`（枚举值）。
+`variant` 只能是下表对应形式里的值；不确定就省略，程序会补。
+
+| visual_form | variant 可选值 | 适合讲什么 |
+|---|---|---|
+| 倒计时 | dial / flip / hourglass / ring | 只剩 N 个月、倒计时、期限 |
+| 折线图 | single / area / bars / step / dual | 趋势、膨胀、衰减、累积 |
+| 卡片矩阵 | rain / flip / grid / wave | 数量冲击、N 张 vs M 张 |
+| 树状拆解 | horizontal / vertical / radial / cascade | 方法论、层级、步骤 |
+| 圆环雷达 | rings / polygon / dashed / dual | 多维指标、资源分配 |
+| 时间轴 | horizontal / vertical / zigzag / dots | 阶段、里程碑、期限 |
+| 聚焦镜头 | iris / lens / scan / vignette | 强调一个词、顿悟 |
+| 对比轨道 | tracks / split / bars / mirror | 两种处境的差距 |
+| 进度条 | bar / segments / ring / fill | 单一指标的收缩 / 填充 |
+| 方块拆解 | explode / grid / cascade / stack | 把 10 年拆成 6 个月、整体拆成小块 |
+| 节点推演 | radial / chain / tree / pulse | 一个节点推出多个后果 / 分支 |
+| 眼球特写 | iris / scan / zoom / blink | 注意力、被盯着、看见某个词 |
+| 对比分屏 | vertical / horizontal / diagonal / bars | 左右/上下分屏对比两种人生 |
+| 流程分支 | fork / zigzag / pipeline / loop | 流程、选择、分支、闭环 |
+| 堆叠塔 | tower / stairs / pyramid / columns | 累积、层叠、优先级 |
+
+新增形式的结构化数据字段（没有就省略，程序会降级为聚焦镜头；禁止画假数据）：
+- 方块拆解：`groups: [{label, count}]` 或 `parts: [{label, value}]`；也可只写 `meta.contrast`。
+- 节点推演 / 流程分支：`nodes: [步骤…]` 或 `steps: [步骤…]`；也可只写 `meta.method_steps`。
+- 眼球特写：`text: 被注视的关键词`（≤8 字）；没有就用 `highlight`。
+- 对比分屏：`left: {label, value}` + `right: {label, value}`；也可只写 `meta.contrast`。
+- 堆叠塔：`values: [数字…]` 或 `steps: [步骤…]`；也可只写 `meta.method_steps`。
+
+硬性规则：
+1. 全片至少使用 4 种不同的 `visual_form`；相邻场景不得使用同一种形式。
+2. 所有图形数据必须来自本场景旁白（数字/标签要念出来）；写不出真实数据就改用 `聚焦镜头`。
+3. `variant` 只写枚举值，不要写颜色、布局、入场、曲线；这些由程序按 seed 选择。
+4. 你只输出 YAML 枚举值和参数，不要输出 HTML / JS / TSX / 任何渲染代码。
+'''
+
+
+PROMPTS["node1_script"] = PROMPTS["node1_script"] + "\n\n" + P11_PROMPT_SUFFIX
+PROMPTS["node1_script_brutal"] = PROMPTS["node1_script_brutal"] + "\n\n" + P11_PROMPT_SUFFIX
 
 
 THEMES = {'paper': {'name': 'paper',
@@ -600,9 +740,13 @@ const THEME = __THEME_JSON__;
 const W = 1920, H = 1080, FPS = 30;
 const meta = SCRIPT.meta || {};
 const FONT = 'system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
-const INK = "#f8fafc", RED = "#ef4444", SLATE = "#94a3b8";
-const PRIMARY = /^#[0-9a-f]{6}$/i.test(THEME.primary || "") ? THEME.primary : "#22d3ee";
-const BG = /^#[0-9a-f]{6}$/i.test(THEME.bg || "") ? THEME.bg : "#06080f";
+function hexColor(v, fallback) { return /^#[0-9a-f]{6}$/i.test(String(v || "")) ? v : fallback; }
+const PAL = (THEME && THEME.palette) || {};
+const INK = hexColor(PAL.ink, "#f8fafc"), RED = "#ef4444", SLATE = hexColor(PAL.muted, "#94a3b8");
+const PRIMARY = hexColor(PAL.primary, hexColor(THEME.primary, "#22d3ee"));
+const BG = hexColor(PAL.bg, hexColor(THEME.bg, "#06080f"));
+const ACCENT = hexColor(PAL.accent, PRIMARY);
+const LEGACY_MOTION = !!(THEME && THEME.legacyMotion);
 /* v2.4 版面分区（1080 高）：标题 ≈ y 85–185；辅助文案 ≈ 200–245；主图形 250–810；
  * 810 以下整块留给烧录字幕（字幕最多两行，顶边 ≈ 880）。主图形与文字一律不得进入 SAFE_BOTTOM 以下。 */
 const VIZ = { cx: 0, cy: -10, w: 1560, h: 560 };
@@ -725,10 +869,17 @@ function elWindow(el, s) {
 const FORM_KEY = {
   "折线图": "line", "卡片矩阵": "cards", "树状拆解": "tree", "圆环雷达": "radar", "时间轴": "timeline",
   "聚焦镜头": "spotlight", "对比轨道": "compare", "进度条": "progress", "倒计时": "countdown",
+  "方块拆解": "blocks", "节点推演": "nodes", "眼球特写": "eye", "对比分屏": "split",
+  "流程分支": "flow", "堆叠塔": "stack",
 };
 const TYPE_FORM = {
   linechart: "line", cardgrid: "cards", tree: "tree", radar: "radar", timeline: "timeline",
   spotlight: "spotlight", compare: "compare", progress: "progress", countdown: "countdown",
+  blocks: "blocks", nodes: "nodes", eye: "eye", split: "split", flow: "flow", stack: "stack",
+};
+const TYPE_ALIAS = {
+  blocks: ["cards"], nodes: ["tree"], eye: ["spotlight"], split: ["compare"],
+  flow: ["tree"], stack: ["tree"],
 };
 const ROLE_FORM = { "钩子": "countdown", "共情": "line", "拆解": "cards", "顿悟": "tree", "金句": "progress" };
 /* v2.4：不再有任何“演示用”兜底数据。meta.contrast 解析不出两个带数字的部分就返回 []，
@@ -746,6 +897,12 @@ function contrastParts() {
 function dataOf(s, form) {
   let el = null;
   for (const e of s.els) if (TYPE_FORM[String(e.type || "").toLowerCase()] === form) { el = e; break; }
+  if (!el) {
+    for (const alias of (TYPE_ALIAS[form] || [])) {
+      for (const e of s.els) if (TYPE_FORM[String(e.type || "").toLowerCase()] === alias) { el = e; break; }
+      if (el) break;
+    }
+  }
   const d = el ? (el.data && typeof el.data === "object" ? el.data : el) : {};
   return { el, d };
 }
@@ -829,6 +986,7 @@ function roundRect(g, x, y, w, h, r) {
 
 function drawLineChart(g, t, o) {
   const d = o.data || {};
+  const variant = o.variant || "single";
   let pts = Array.isArray(d.points) ? d.points.map(Number).filter(isFinite) : [];
   if (pts.length < 2) return { x: o.cx, y: o.cy };
   const x0 = o.cx - o.w / 2 + 110, x1 = o.cx + o.w / 2 - 70;
@@ -838,6 +996,20 @@ function drawLineChart(g, t, o) {
   const Y = (v) => lerp(y0, y1, (v - lo) / (hi - lo || 1));
   const down = d.trend === "down" || (d.trend !== "up" && pts[pts.length - 1] < pts[0]);
   const lineColor = o.color || (down ? RED : PRIMARY);
+  if (variant === "bars") {
+    g.save();
+    const n = pts.length, bw = (x1 - x0) / n * 0.62;
+    for (let i = 0; i < n; i++) {
+      const u = easeOutCubic(prog(t, i / (n * 1.6), 0.45 + i / (n * 1.6)));
+      if (u <= 0) continue;
+      const by = Y(pts[i]), h = Math.max(2, (y0 - by) * u);
+      roundRect(g, X(i) - bw / 2, y0 - h, bw, h, Math.min(12, bw * 0.2));
+      g.fillStyle = rgba(lineColor, 0.8); g.fill();
+      drawText(g, fmtNum(pts[i]), X(i), y0 - h - 30, { size: 34, color: INK, weight: 700, alpha: u });
+    }
+    g.restore();
+    return { x: X(n - 1), y: Y(pts[n - 1]) };
+  }
   const gridIn = easeOutCubic(prog(t, 0, 0.35));
   g.save();
   g.lineCap = "round"; g.lineJoin = "round";
@@ -848,18 +1020,39 @@ function drawLineChart(g, t, o) {
   }
   g.strokeStyle = rgba(INK, 0.45); g.lineWidth = 3;
   g.beginPath(); g.moveTo(x0, y1 - 20); g.lineTo(x0, y0); g.lineTo(lerp(x0, x1 + 30, gridIn), y0); g.stroke();
+  if (variant === "dual") {
+    g.save();
+    g.setLineDash([14, 12]); g.strokeStyle = rgba(SLATE, 0.65); g.lineWidth = 4;
+    g.beginPath(); g.moveTo(x0, Y(hi * 0.55)); g.lineTo(x1, Y(hi * 0.55)); g.stroke();
+    g.setLineDash([]);
+    g.restore();
+  }
   const f = easeOutCubic(prog(t, 0.06, 0.92)) * (pts.length - 1);
   const seg = Math.floor(f), frac = f - seg;
   let hx = X(0), hy = Y(pts[0]);
   g.strokeStyle = lineColor; g.lineWidth = 8; g.shadowColor = lineColor; g.shadowBlur = 26;
   g.beginPath(); g.moveTo(X(0), Y(pts[0]));
-  for (let i = 1; i <= seg && i < pts.length; i++) g.lineTo(X(i), Y(pts[i]));
+  for (let i = 1; i <= seg && i < pts.length; i++) {
+    if (variant === "step") { g.lineTo(X(i), Y(pts[i - 1])); g.lineTo(X(i), Y(pts[i])); }
+    else g.lineTo(X(i), Y(pts[i]));
+  }
   if (seg < pts.length - 1) {
     hx = lerp(X(seg), X(seg + 1), frac); hy = lerp(Y(pts[seg]), Y(pts[seg + 1]), frac);
     g.lineTo(hx, hy);
   } else { hx = X(pts.length - 1); hy = Y(pts[pts.length - 1]); }
   g.stroke();
   g.shadowBlur = 0;
+  if (variant === "area") {
+    g.save();
+    g.beginPath(); g.moveTo(X(0), y0);
+    for (let i = 0; i < pts.length; i++) g.lineTo(X(i), Y(pts[i]));
+    g.lineTo(X(pts.length - 1), y0); g.closePath();
+    const grad = g.createLinearGradient(0, y1, 0, y0);
+    grad.addColorStop(0, rgba(lineColor, 0.3));
+    grad.addColorStop(1, rgba(lineColor, 0.02));
+    g.fillStyle = grad; g.fill();
+    g.restore();
+  }
   const curV = seg < pts.length - 1 ? lerp(pts[seg], pts[seg + 1], frac) : pts[pts.length - 1];
   const breathe = 1 + 0.12 * Math.sin(o.time * 5);
   glowDot(g, hx, hy, 15 * breathe, down ? RED : PRIMARY, 1);
@@ -874,6 +1067,7 @@ function drawLineChart(g, t, o) {
 
 function drawCardGrid(g, t, o) {
   const d = o.data || {};
+  const variant = o.variant || "rain";
   let groups = Array.isArray(d.groups) ? d.groups.filter((x) => x && isFinite(Number(x.count))) : [];
   if (groups.length < 1) groups = contrastParts();
   if (groups.length < 1) return { x: o.cx, y: o.cy };
@@ -904,15 +1098,18 @@ function drawCardGrid(g, t, o) {
       if (u <= 0) continue;
       const cxj = gx0 + (j % colsK) * cell + cell / 2;
       const cyj = top + Math.floor(j / colsK) * (ch + (cell - cw)) + ch / 2;
-      const dy = -(1 - easeOutBack(u)) * 280;
-      const a = clamp(u * 3, 0, 1);
-      roundRect(g, cxj - cw / 2, cyj - ch / 2 + dy, cw, ch, Math.max(4, cw * 0.1));
+      let dy = 0, drawW = cw;
+      if (variant === "rain") dy = -(1 - easeOutBack(u)) * 280;
+      else if (variant === "wave") dy = -(1 - easeOutCubic(u)) * 70 + Math.sin((j + gi * 3) * 0.55) * 10;
+      else if (variant === "flip") drawW = Math.max(1, cw * easeOutBack(u));
+      const a = variant === "grid" ? clamp(u * 2, 0, 1) : clamp(u * 3, 0, 1);
+      roundRect(g, cxj - drawW / 2, cyj - ch / 2 + dy, drawW, ch, Math.max(4, drawW * 0.1));
       g.fillStyle = rgba(color, 0.14 * a); g.fill();
-      g.lineWidth = Math.max(2, cw * 0.035); g.strokeStyle = rgba(color, 0.95 * a); g.stroke();
-      g.strokeStyle = rgba(color, 0.55 * a); g.lineWidth = Math.max(1.5, cw * 0.02);
+      g.lineWidth = Math.max(2, drawW * 0.035); g.strokeStyle = rgba(color, 0.95 * a); g.stroke();
+      g.strokeStyle = rgba(color, 0.55 * a); g.lineWidth = Math.max(1.5, drawW * 0.02);
       g.beginPath();
-      g.moveTo(cxj - cw * 0.28, cyj + dy - ch * 0.08); g.lineTo(cxj + cw * 0.28, cyj + dy - ch * 0.08);
-      g.moveTo(cxj - cw * 0.28, cyj + dy + ch * 0.18); g.lineTo(cxj + cw * 0.1, cyj + dy + ch * 0.18);
+      g.moveTo(cxj - drawW * 0.28, cyj + dy - ch * 0.08); g.lineTo(cxj + drawW * 0.28, cyj + dy - ch * 0.08);
+      g.moveTo(cxj - drawW * 0.28, cyj + dy + ch * 0.18); g.lineTo(cxj + drawW * 0.1, cyj + dy + ch * 0.18);
       g.stroke();
     }
     const roll = Math.round(gr.count * easeOutCubic(prog(t, 0.1, 0.92)));
@@ -933,6 +1130,7 @@ function treeLabels(o) {
 }
 function drawTree(g, t, o) {
   const d = o.data || {};
+  const variant = o.variant || "horizontal";
   const nodes = treeLabels(o);
   if (!nodes.length) return { x: o.cx, y: o.cy };
   const n = nodes.length;
@@ -941,6 +1139,7 @@ function drawTree(g, t, o) {
   const rowH = Math.min(124, (o.h - 30) / n);
   const root = String(d.root || o.meta.law_name || "计划");
   const rootR = 118;
+  if (variant !== "horizontal") return drawTreeAlt(g, t, o, nodes, root, variant);
   const span = Math.max(1.5, o.dur * 0.82);
   const times = nodes.map((_, i) => {
     const cue = Array.isArray(d.node_times) ? Number(d.node_times[i]) : NaN;
@@ -1001,12 +1200,93 @@ function drawTree(g, t, o) {
   return { x: rootX, y: rootY };
 }
 
+function drawTreeAlt(g, t, o, nodes, root, variant) {
+  const n = nodes.length;
+  const rootR = 100;
+  let rootX = o.cx, rootY = o.cy - o.h * 0.34;
+  let positions = [];
+  if (variant === "radial") {
+    rootX = o.cx; rootY = o.cy;
+    const rad = Math.min(o.w, o.h) * 0.36;
+    positions = nodes.map((_, i) => {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / n;
+      return { x: o.cx + Math.cos(a) * rad, y: o.cy + Math.sin(a) * rad };
+    });
+  } else if (variant === "vertical") {
+    const gap = Math.min(300, o.w / (n + 0.5));
+    positions = nodes.map((_, i) => ({
+      x: o.cx - (n - 1) * gap / 2 + i * gap,
+      y: o.cy + o.h * 0.24,
+    }));
+  } else {
+    positions = nodes.map((_, i) => ({
+      x: o.cx - o.w * 0.22 + i * (o.w * 0.16),
+      y: o.cy - o.h * 0.18 + i * (o.h * 0.14),
+    }));
+  }
+  g.save();
+  g.lineCap = "round";
+  const ru = easeOutBack(prog(t, 0, 0.22));
+  g.beginPath(); g.arc(rootX, rootY, rootR * ru, 0, Math.PI * 2);
+  g.fillStyle = rgba(PRIMARY, 0.12); g.fill();
+  g.lineWidth = 6; g.strokeStyle = PRIMARY; g.shadowColor = PRIMARY; g.shadowBlur = 22; g.stroke(); g.shadowBlur = 0;
+  drawText(g, root, rootX, rootY, { size: 46, color: INK, weight: 800, maxW: rootR * 1.6, alpha: clamp(ru, 0, 1) });
+  nodes.forEach((label, i) => {
+    const pos = positions[i];
+    const u = easeOutCubic(prog(t, 0.18 + i * 0.08, 0.55 + i * 0.08));
+    if (u <= 0) return;
+    g.strokeStyle = rgba(PRIMARY, 0.7 * u); g.lineWidth = 4;
+    g.beginPath(); g.moveTo(rootX, rootY); g.lineTo(pos.x, pos.y); g.stroke();
+    const pu = easeOutBack(prog(t, 0.32 + i * 0.08, 0.7 + i * 0.08));
+    g.save();
+    g.translate(pos.x, pos.y); g.scale(clamp(pu, 0, 1.1), clamp(pu, 0, 1.1));
+    g.font = `700 44px ${FONT}`;
+    const tw = Math.min(g.measureText(label).width, o.w * 0.34);
+    const pw = Math.max(130, tw + 90), ph = 76;
+    roundRect(g, -pw / 2, -ph / 2, pw, ph, 38);
+    g.fillStyle = "rgba(15,23,42,0.92)"; g.fill();
+    g.lineWidth = 3; g.strokeStyle = rgba(PRIMARY, 0.75); g.stroke();
+    g.beginPath(); g.arc(-pw / 2 + 36, 0, 22, 0, Math.PI * 2);
+    g.fillStyle = rgba(PRIMARY, 0.3); g.fill();
+    drawText(g, String(i + 1), -pw / 2 + 36, 2, { size: 28, color: INK, weight: 800 });
+    drawText(g, label, -pw / 2 + 70, 2, { size: 44, color: INK, weight: 700, align: "left", maxW: pw - 90 });
+    g.restore();
+  });
+  g.restore();
+  return { x: rootX, y: rootY };
+}
+
 function drawRadar(g, t, o) {
   const d = o.data || {};
+  const variant = o.variant || "rings";
   let rings = Array.isArray(d.rings) ? d.rings.filter((r) => r && isFinite(Number(r.value))) : [];
   if (!rings.length) return { x: o.cx, y: o.cy };
   rings = rings.slice(0, 5).map((r) => ({ label: String(r.label || ""), value: clamp(Number(r.value) > 1 ? Number(r.value) / 100 : Number(r.value), 0, 1) }));
   const n = rings.length;
+  if (variant === "polygon" && n >= 3) {
+    const cx = o.cx - o.w * 0.1, cy = o.cy, R = Math.min(o.h * 0.42, 260);
+    g.save(); g.lineCap = "round";
+    for (let i = 0; i < n; i++) {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / n;
+      g.strokeStyle = rgba(INK, 0.12); g.lineWidth = 2;
+      g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R); g.stroke();
+    }
+    const pts = rings.map((r, i) => {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / n;
+      const u = easeOutCubic(prog(t, 0.05 + i * 0.08, 0.75 + i * 0.05));
+      return [cx + Math.cos(a) * R * r.value * u, cy + Math.sin(a) * R * r.value * u];
+    });
+    g.beginPath(); pts.forEach((p, i) => { if (i === 0) g.moveTo(p[0], p[1]); else g.lineTo(p[0], p[1]); }); g.closePath();
+    g.fillStyle = rgba(PRIMARY, 0.18); g.fill();
+    g.strokeStyle = PRIMARY; g.lineWidth = 6; g.shadowColor = PRIMARY; g.shadowBlur = 20; g.stroke(); g.shadowBlur = 0;
+    rings.forEach((r, i) => {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / n;
+      drawText(g, r.label, cx + Math.cos(a) * (R + 70), cy + Math.sin(a) * (R + 70), { size: 38, color: INK, weight: 700, maxW: 220 });
+      glowDot(g, pts[i][0], pts[i][1], 12, PRIMARY, 1);
+    });
+    g.restore();
+    return { x: cx, y: cy - R };
+  }
   const R = o.h / 2 - 8, gapR = Math.min(74, R / (n + 0.6)), lw = gapR * 0.56;
   const cx = o.cx - o.w * 0.2, cy = o.cy;
   const cols = [PRIMARY, INK, RED, SLATE, "#a78bfa"];
@@ -1020,8 +1300,15 @@ function drawRadar(g, t, o) {
     g.beginPath(); g.arc(cx, cy, rad, 0, Math.PI * 2); g.stroke();
     const u = easeOutCubic(prog(t, 0.05 + i * 0.1, 0.8 + i * 0.05));
     const ang = -Math.PI / 2 + Math.PI * 2 * r.value * u;
+    if (variant === "dashed") g.setLineDash([18, 14]);
     g.strokeStyle = col; g.shadowColor = col; g.shadowBlur = 20;
     g.beginPath(); g.arc(cx, cy, rad, -Math.PI / 2, ang); g.stroke(); g.shadowBlur = 0;
+    if (variant === "dashed") g.setLineDash([]);
+    if (variant === "dual") {
+      g.globalAlpha = 0.45; g.lineWidth = lw * 0.5;
+      g.beginPath(); g.arc(cx, cy, rad + 10, -Math.PI / 2, ang); g.stroke();
+      g.globalAlpha = 1; g.lineWidth = lw;
+    }
     if (i === 0) anchor = { x: cx + Math.cos(ang) * rad, y: cy + Math.sin(ang) * rad };
     const lx = o.cx + o.w * 0.06, ly = o.cy + (i - (n - 1) / 2) * 104;
     g.fillStyle = col; g.beginPath(); g.arc(lx, ly, 15, 0, Math.PI * 2); g.fill();
@@ -1034,6 +1321,7 @@ function drawRadar(g, t, o) {
 
 function drawTimeline(g, t, o) {
   const d = o.data || {};
+  const variant = o.variant || "horizontal";
   let ms = Array.isArray(d.milestones) ? d.milestones : [];
   ms = ms.map((m) => (m && typeof m === "object" ? { label: String(m.label || m.text || ""), at: Number(m.at) } : { label: String(m), at: NaN }))
     .filter((m) => m.label);
@@ -1044,6 +1332,7 @@ function drawTimeline(g, t, o) {
   }
   ms = ms.slice(0, 6);
   const n = ms.length;
+  if (variant !== "horizontal") return drawTimelineAlt(g, t, o, ms, variant);
   const x0 = o.cx - o.w / 2 + 90, x1 = o.cx + o.w / 2 - 90, y = o.cy;
   const f = easeInOutCubic(prog(t, 0.05, 0.9));
   const hx = lerp(x0, x1, f);
@@ -1078,14 +1367,72 @@ function drawTimeline(g, t, o) {
   return { x: hx, y };
 }
 
+function drawTimelineAlt(g, t, o, ms, variant) {
+  const n = ms.length;
+  const u = easeInOutCubic(prog(t, 0.05, 0.9));
+  g.save(); g.lineCap = "round";
+  if (variant === "vertical") {
+    const x = o.cx, y0 = o.cy - o.h / 2 + 40, y1 = o.cy + o.h / 2 - 40;
+    g.strokeStyle = rgba(INK, 0.16); g.lineWidth = 6;
+    g.beginPath(); g.moveTo(x, y0); g.lineTo(x, y1); g.stroke();
+    g.strokeStyle = rgba(INK, 0.9); g.lineWidth = 6; g.shadowColor = PRIMARY; g.shadowBlur = 16;
+    g.beginPath(); g.moveTo(x, y0); g.lineTo(x, lerp(y0, y1, u)); g.stroke(); g.shadowBlur = 0;
+    ms.forEach((m, i) => {
+      const y = lerp(y0, y1, i / Math.max(1, n - 1));
+      if (y > lerp(y0, y1, u) + 8) return;
+      const left = i % 2 === 0;
+      g.beginPath(); g.arc(x, y, 18, 0, Math.PI * 2);
+      g.fillStyle = BG; g.fill(); g.lineWidth = 5; g.strokeStyle = i === n - 1 ? RED : PRIMARY; g.stroke();
+      drawText(g, m.label, x + (left ? -36 : 36), y, { size: 42, color: INK, weight: 700, align: left ? "right" : "left", maxW: o.w * 0.36 });
+    });
+    g.restore();
+    return { x, y: lerp(y0, y1, u) };
+  }
+  const x0 = o.cx - o.w / 2 + 80, x1 = o.cx + o.w / 2 - 80;
+  const zig = variant === "zigzag";
+  const pts = ms.map((_, i) => ({
+    x: lerp(x0, x1, i / Math.max(1, n - 1)),
+    y: o.cy + (zig ? (i % 2 ? 70 : -70) : 0),
+  }));
+  if (variant === "dots") g.setLineDash([2, 18]);
+  g.strokeStyle = rgba(INK, 0.22); g.lineWidth = 5;
+  g.beginPath(); pts.forEach((p, i) => { if (i === 0) g.moveTo(p.x, p.y); else g.lineTo(p.x, p.y); }); g.stroke();
+  if (variant === "dots") g.setLineDash([]);
+  const head = lerp(x0, x1, u);
+  g.strokeStyle = PRIMARY; g.lineWidth = 6; g.shadowColor = PRIMARY; g.shadowBlur = 16;
+  g.beginPath(); g.moveTo(pts[0].x, pts[0].y);
+  pts.forEach((p) => { if (p.x <= head) g.lineTo(p.x, p.y); }); g.stroke(); g.shadowBlur = 0;
+  ms.forEach((m, i) => {
+    const p = pts[i];
+    if (p.x > head + 6) return;
+    g.beginPath(); g.arc(p.x, p.y, 16, 0, Math.PI * 2);
+    g.fillStyle = BG; g.fill(); g.lineWidth = 5; g.strokeStyle = i === n - 1 ? RED : PRIMARY; g.stroke();
+    drawText(g, m.label, p.x, p.y + (zig ? (i % 2 ? 86 : -86) : -84), { size: 40, color: INK, weight: 700, maxW: o.w / Math.max(2, n) });
+  });
+  glowDot(g, head, o.cy, 15, PRIMARY, 1);
+  g.restore();
+  return { x: head, y: o.cy };
+}
+
 function drawSpotlight(g, t, o) {
   const d = o.data || {};
+  const variant = o.variant || "iris";
   const text = String(d.text || d.target || o.fallbackText || "");
   const sub = String(d.sub || "");
   const u = easeInOutCubic(prog(t, 0, 0.75));
   const r = lerp(620, 235, u) * (1 + 0.012 * Math.sin(o.time * 3));
   const rng = mulberry32(7);
   g.save();
+  if (variant === "vignette") {
+    const grad = g.createRadialGradient(o.cx, o.cy, 120, o.cx, o.cy, Math.max(W, H) * 0.62);
+    grad.addColorStop(0, "rgba(0,0,0,0)");
+    grad.addColorStop(1, "rgba(0,0,0,0.82)");
+    g.fillStyle = grad; g.fillRect(-W / 2, -H / 2, W, H);
+    if (text && !o.golden) drawText(g, text, o.cx, o.cy - (sub ? 28 : 0), { size: 124, color: INK, weight: 800, maxW: 1320, glow: 22, glowColor: PRIMARY, alpha: 0.35 + 0.65 * clamp(u * 1.6, 0, 1) });
+    if (sub && !o.golden) drawText(g, sub, o.cx, o.cy + 96, { size: 50, color: SLATE, weight: 600, maxW: 1200 });
+    g.restore();
+    return { x: o.cx, y: o.cy };
+  }
   for (let i = 0; i < 70; i++) {
     const px = o.cx + (rng() - 0.5) * W * 0.92, py = o.cy + (rng() - 0.5) * 760;
     const dist = Math.hypot(px - o.cx, py - o.cy);
@@ -1097,23 +1444,42 @@ function drawSpotlight(g, t, o) {
   g.moveTo(o.cx, o.cy - r - 50); g.lineTo(o.cx, o.cy - r + 30); g.moveTo(o.cx, o.cy + r - 30); g.lineTo(o.cx, o.cy + r + 50); g.stroke();
   g.lineWidth = 6; g.strokeStyle = PRIMARY; g.shadowColor = PRIMARY; g.shadowBlur = 28;
   g.beginPath(); g.arc(o.cx, o.cy, r, 0, Math.PI * 2); g.stroke(); g.shadowBlur = 0;
+  if (variant === "lens") {
+    g.setLineDash([18, 14]); g.lineWidth = 4; g.strokeStyle = rgba(ACCENT, 0.8);
+    g.beginPath(); g.arc(o.cx, o.cy, r * 1.12, 0, Math.PI * 2); g.stroke(); g.setLineDash([]);
+    for (let k = 0; k < 16; k++) {
+      const a = k * Math.PI / 8;
+      g.strokeStyle = rgba(INK, 0.35); g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(o.cx + Math.cos(a) * r * 1.14, o.cy + Math.sin(a) * r * 1.14);
+      g.lineTo(o.cx + Math.cos(a) * r * 1.2, o.cy + Math.sin(a) * r * 1.2);
+      g.stroke();
+    }
+  }
+  if (variant === "scan") {
+    const sy = o.cy + Math.sin(o.time * 1.6) * r * 0.9;
+    g.strokeStyle = rgba(ACCENT, 0.85); g.lineWidth = 4; g.shadowColor = ACCENT; g.shadowBlur = 20;
+    g.beginPath(); g.moveTo(o.cx - r * 1.1, sy); g.lineTo(o.cx + r * 1.1, sy); g.stroke(); g.shadowBlur = 0;
+  }
   const grad = g.createRadialGradient(o.cx, o.cy, r * 0.96, o.cx, o.cy, r * 1.5);
   grad.addColorStop(0, "rgba(6,8,15,0)"); grad.addColorStop(1, "rgba(6,8,15,0.8)");
   g.fillStyle = grad; g.fillRect(-W / 2, -H / 2, W, H);
-  if (text) drawText(g, text, o.cx, o.cy - (sub ? 28 : 0), { size: 124, color: INK, weight: 800, maxW: r * 1.7, glow: 22, glowColor: PRIMARY, alpha: 0.35 + 0.65 * clamp(u * 1.6, 0, 1) });
-  if (sub) drawText(g, sub, o.cx, o.cy + 96, { size: 50, color: SLATE, weight: 600, maxW: r * 1.7 });
+  if (text && !o.golden) drawText(g, text, o.cx, o.cy - (sub ? 28 : 0), { size: 124, color: INK, weight: 800, maxW: r * 1.7, glow: 22, glowColor: PRIMARY, alpha: 0.35 + 0.65 * clamp(u * 1.6, 0, 1) });
+  if (sub && !o.golden) drawText(g, sub, o.cx, o.cy + 96, { size: 50, color: SLATE, weight: 600, maxW: r * 1.7 });
   g.restore();
   return { x: o.cx, y: o.cy };
 }
 
 function drawCompare(g, t, o) {
   const d = o.data || {};
+  const variant = o.variant || "tracks";
   const cp = contrastParts();
   if (cp.length < 2 && !(d.left && d.right)) return { x: o.cx, y: o.cy };
   const c0 = cp[0] || { label: "", count: 0 }, c1 = cp[1] || { label: "", count: 0 };
   const L = Object.assign({ label: c0.label, value: c0.count }, d.left || {});
   const R = Object.assign({ label: c1.label, value: c1.count }, d.right || {});
   const lv = Math.max(0, Number(L.value) || 0), rv = Math.max(0, Number(R.value) || 0);
+  if (variant !== "tracks") return drawCompareAlt(g, t, o, L, R, lv, rv, variant);
   const big = Math.max(lv, rv, 1e-9);
   const x0 = o.cx - o.w / 2 + 330, x1 = o.cx + o.w / 2 - 170, len = x1 - x0;
   const yA = o.cy - 120, yB = o.cy + 120;
@@ -1152,6 +1518,50 @@ function drawCompare(g, t, o) {
   return anchor;
 }
 
+function drawCompareAlt(g, t, o, L, R, lv, rv, variant) {
+  const big = Math.max(lv, rv, 1e-9);
+  const u = easeOutBack(prog(t, 0.05, 0.8));
+  const ua = clamp(u, 0, 1.05);
+  g.save();
+  if (variant === "split") {
+    const gap = 40, pw = (o.w - gap) / 2, ph = o.h * 0.62, y = o.cy - ph / 2;
+    [[-1, L, lv, PRIMARY], [1, R, rv, INK]].forEach(([side, item, val, col]) => {
+      const x = o.cx + side * (pw / 2 + gap / 2) - pw / 2;
+      g.save(); g.translate(x + pw / 2, o.cy); g.scale(ua, ua); g.translate(-(x + pw / 2), -o.cy);
+      roundRect(g, x, y, pw, ph, 28);
+      g.fillStyle = rgba(col, 0.1); g.fill();
+      g.lineWidth = 4; g.strokeStyle = rgba(col, 0.75); g.stroke();
+      drawText(g, item.label || "", x + pw / 2, y + 70, { size: 46, color: SLATE, weight: 700, maxW: pw - 40 });
+      drawText(g, fmtNum(val) + (item.unit || ""), x + pw / 2, y + ph * 0.56, { size: 132, color: col, weight: 800, glow: 18, maxW: pw - 30 });
+      g.restore();
+    });
+    g.restore();
+    return { x: o.cx, y: o.cy };
+  }
+  if (variant === "bars") {
+    const bw = Math.min(170, o.w * 0.18), base = o.cy + o.h * 0.3, maxH = o.h * 0.58;
+    [[-1, L, lv, PRIMARY], [1, R, rv, INK]].forEach(([side, item, val, col]) => {
+      const x = o.cx + side * o.w * 0.2, h = Math.max(6, (val / big) * maxH);
+      roundRect(g, x - bw / 2, base - h * ua, bw, h * ua, 18);
+      g.fillStyle = rgba(col, 0.8); g.fill();
+      drawText(g, fmtNum(val) + (item.unit || ""), x, base - h * ua - 46, { size: 64, color: col, weight: 800, glow: 12 });
+      drawText(g, item.label || "", x, base + 54, { size: 38, color: SLATE, weight: 700, maxW: bw * 1.8 });
+    });
+    g.restore();
+    return { x: o.cx, y: base - maxH / 2 };
+  }
+  const x = o.cx, half = o.w * 0.42, bh = 56;
+  [[-1, L, lv, PRIMARY], [1, R, rv, INK]].forEach(([side, item, val, col]) => {
+    const len = Math.max(8, (val / big) * half * ua), y = o.cy + side * 110;
+    roundRect(g, side < 0 ? x - len : x, y - bh / 2, len, bh, 28);
+    g.fillStyle = rgba(col, 0.8); g.fill();
+    drawText(g, fmtNum(val) + (item.unit || ""), side < 0 ? x - len - 24 : x + len + 24, y, { size: 56, color: col, weight: 800, align: side < 0 ? "right" : "left", glow: 10 });
+    drawText(g, item.label || "", x, y + 66, { size: 36, color: SLATE, weight: 700, maxW: half });
+  });
+  g.restore();
+  return { x, y: o.cy };
+}
+
 function drawCountdown(g, t, o) {
   const d = o.data || {};
   const raw = String(d.number != null ? d.number : (o.fallbackText || "")).trim();
@@ -1160,18 +1570,56 @@ function drawCountdown(g, t, o) {
   const kicker = String(d.label != null ? d.label : "只剩");
   const remain = clamp(Number(d.remaining) || 0.12, 0.04, 0.5);
   const R = Math.min(o.h / 2, 330), cx = o.cx, cy = o.cy;
+  const variant = o.variant || "dial";
+  const shown = isFinite(num)
+    ? fmtNum(lerp(Number(d.from) || Math.max(num * 2, num + 6), num, easeOutCubic(prog(t, 0.04, 0.8))))
+    : raw;
+  if (variant === "flip") {
+    const w = Math.min(o.w * 0.56, 620), h = 360;
+    const sy = clamp(easeOutBack(prog(t, 0.03, 0.45)), 0.05, 1);
+    g.save();
+    g.translate(cx, cy); g.scale(1, sy); g.translate(-cx, -cy);
+    roundRect(g, cx - w / 2, cy - h / 2, w, h, 32);
+    g.fillStyle = rgba(PRIMARY, 0.08); g.fill();
+    g.lineWidth = 4; g.strokeStyle = PRIMARY; g.shadowColor = PRIMARY; g.shadowBlur = 24; g.stroke(); g.shadowBlur = 0;
+    drawText(g, kicker, cx, cy - 100, { size: 52, color: SLATE, weight: 700 });
+    drawText(g, shown, cx, cy + 10, { size: 180, color: INK, weight: 800, glow: 20, glowColor: PRIMARY });
+    if (unit) drawText(g, unit, cx, cy + 120, { size: 56, color: PRIMARY, weight: 700 });
+    g.restore();
+    return { x: cx, y: cy };
+  }
+  if (variant === "hourglass") {
+    const hw = Math.min(o.w * 0.4, 420), hh = Math.min(o.h * 0.8, 520);
+    const top = cy - hh / 2, bot = cy + hh / 2;
+    const sand = clamp(prog(t, 0.05, 0.85), 0, 1);
+    g.save(); g.lineWidth = 6; g.strokeStyle = PRIMARY; g.shadowColor = PRIMARY; g.shadowBlur = 20;
+    g.beginPath(); g.moveTo(cx - hw / 2, top); g.lineTo(cx + hw / 2, top); g.lineTo(cx, cy); g.closePath(); g.stroke();
+    g.beginPath(); g.moveTo(cx - hw / 2, bot); g.lineTo(cx + hw / 2, bot); g.lineTo(cx, cy); g.closePath(); g.stroke();
+    g.shadowBlur = 0;
+    g.beginPath(); g.moveTo(cx - hw / 2, top); g.lineTo(cx + hw / 2, top); g.lineTo(cx, cy); g.closePath();
+    g.fillStyle = rgba(PRIMARY, 0.2); g.fill();
+    g.strokeStyle = rgba(RED, 0.85); g.lineWidth = 4;
+    g.beginPath(); g.moveTo(cx, cy + 8); g.lineTo(cx, lerp(cy + 8, bot - 24, sand)); g.stroke();
+    drawText(g, kicker, cx, top - 66, { size: 52, color: SLATE, weight: 700 });
+    drawText(g, shown, cx, cy + 44, { size: 120, color: INK, weight: 800, glow: 18, glowColor: PRIMARY });
+    if (unit) drawText(g, unit, cx, bot + 62, { size: 56, color: PRIMARY, weight: 700 });
+    g.restore();
+    return { x: cx, y: cy };
+  }
   const u = easeInOutCubic(prog(t, 0.04, 0.92));
   const frac = lerp(1, remain, u);
   const alarm = smootherstep(prog(t, 0.55, 1));
   const col = lerpColor(PRIMARY, RED, alarm);
   g.save();
   g.lineCap = "round";
-  for (let k = 0; k < 60; k++) {
-    const a = -Math.PI / 2 + (k / 60) * Math.PI * 2;
-    const major = k % 5 === 0;
-    const r0 = R + 12, r1 = R + (major ? 36 : 24);
-    g.strokeStyle = rgba(INK, major ? 0.55 : 0.22); g.lineWidth = major ? 4 : 2;
-    g.beginPath(); g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0); g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1); g.stroke();
+  if (variant !== "ring") {
+    for (let k = 0; k < 60; k++) {
+      const a = -Math.PI / 2 + (k / 60) * Math.PI * 2;
+      const major = k % 5 === 0;
+      const r0 = R + 12, r1 = R + (major ? 36 : 24);
+      g.strokeStyle = rgba(INK, major ? 0.55 : 0.22); g.lineWidth = major ? 4 : 2;
+      g.beginPath(); g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0); g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1); g.stroke();
+    }
   }
   g.strokeStyle = rgba(INK, 0.12); g.lineWidth = 16;
   g.beginPath(); g.arc(cx, cy, R - 4, 0, Math.PI * 2); g.stroke();
@@ -1182,11 +1630,6 @@ function drawCountdown(g, t, o) {
   g.strokeStyle = rgba(INK, 0.85); g.lineWidth = 5;
   g.beginPath(); g.moveTo(cx + Math.cos(a1) * (R - 120), cy + Math.sin(a1) * (R - 120)); g.lineTo(cx + Math.cos(a1) * (R - 40), cy + Math.sin(a1) * (R - 40)); g.stroke();
   glowDot(g, tipX, tipY, 17 * (1 + 0.12 * Math.sin(o.time * 6)), col, 1);
-  let shown = raw;
-  if (isFinite(num)) {
-    const from = Number(d.from) || Math.max(num * 2, num + 6);
-    shown = fmtNum(lerp(from, num, easeOutCubic(prog(t, 0.04, 0.8))));
-  }
   const alpha = 0.55 + 0.45 * clamp(t * 6, 0, 1);
   drawText(g, kicker, cx, cy - 150, { size: 66, color: SLATE, weight: 700, alpha });
   const nsize = raw.length > 4 && !isFinite(num) ? 120 : 220;
@@ -1201,9 +1644,50 @@ function drawCountdown(g, t, o) {
 
 function drawProgressBar(g, t, o) {
   const d = o.data || {};
+  const variant = o.variant || "bar";
   const from = clamp(Number(d.from != null ? d.from : 1), 0, 1), to = clamp(Number(d.to != null ? d.to : 0.12), 0, 1);
   const u = easeOutCubic(prog(t, 0.05, 0.9));
   const v = lerp(from, to, u);
+  if (variant === "segments") {
+    const count = 24, bw = o.w * 0.82, gap = 10, segW = (bw - gap * (count - 1)) / count;
+    const x0 = o.cx - bw / 2, y = o.cy, col = v < 0.4 ? RED : PRIMARY;
+    g.save();
+    for (let i = 0; i < count; i++) {
+      const on = i / count < v;
+      roundRect(g, x0 + i * (segW + gap), y - 36, segW, 72, 10);
+      g.fillStyle = rgba(on ? col : INK, on ? 0.85 : 0.12); g.fill();
+    }
+    drawText(g, Math.round(v * 100) + "%", o.cx, y - 130, { size: 150, color: INK, weight: 800, glow: 18, glowColor: col });
+    if (d.label) drawText(g, String(d.label), o.cx, y + 110, { size: 52, color: SLATE, weight: 600 });
+    g.restore();
+    return { x: x0 + bw * v, y };
+  }
+  if (variant === "ring") {
+    const R = Math.min(o.h / 2, 240), cx = o.cx, cy = o.cy, col = v < 0.4 ? RED : PRIMARY;
+    const a0 = -Math.PI / 2, a1 = a0 + Math.PI * 2 * v;
+    g.save(); g.lineCap = "round";
+    g.strokeStyle = rgba(INK, 0.12); g.lineWidth = 26;
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.stroke();
+    g.strokeStyle = col; g.lineWidth = 26; g.shadowColor = col; g.shadowBlur = 26;
+    g.beginPath(); g.arc(cx, cy, R, a0, a1); g.stroke(); g.shadowBlur = 0;
+    drawText(g, Math.round(v * 100) + "%", cx, cy + 10, { size: 110, color: INK, weight: 800, glow: 14, glowColor: col });
+    if (d.label) drawText(g, String(d.label), cx, cy + R + 70, { size: 48, color: SLATE, weight: 600 });
+    g.restore();
+    return { x: cx + Math.cos(a1) * R, y: cy + Math.sin(a1) * R };
+  }
+  if (variant === "fill") {
+    const bw = Math.min(o.w * 0.36, 520), bh = o.h * 0.7, x0 = o.cx - bw / 2, y0 = o.cy - bh / 2;
+    const col = v < 0.4 ? RED : PRIMARY, fh = bh * v;
+    g.save();
+    roundRect(g, x0, y0, bw, bh, 28); g.fillStyle = rgba(INK, 0.08); g.fill();
+    g.lineWidth = 3; g.strokeStyle = rgba(INK, 0.25); g.stroke();
+    roundRect(g, x0 + 8, y0 + bh - fh + 8, bw - 16, Math.max(0, fh - 16), 20);
+    g.fillStyle = rgba(col, 0.75); g.fill();
+    drawText(g, Math.round(v * 100) + "%", o.cx, o.cy, { size: 110, color: INK, weight: 800, glow: 14, glowColor: col });
+    if (d.label) drawText(g, String(d.label), o.cx, y0 + bh + 64, { size: 48, color: SLATE, weight: 600 });
+    g.restore();
+    return { x: o.cx, y: y0 + bh - fh };
+  }
   const bw = o.w * 0.82, bh = 74, x0 = o.cx - bw / 2, y = o.cy;
   const col = lerpColor(PRIMARY, RED, clamp((from - v) / Math.max(0.01, from - to), 0, 1) * (to < 0.4 ? 1 : 0.3));
   g.save();
@@ -1255,6 +1739,270 @@ function morphPoints(from, to, p) {
   return out;
 }
 
+function drawBlocks(g, t, o) {
+  const d = o.data || {};
+  const variant = o.variant || "explode";
+  let groups = Array.isArray(d.groups)
+    ? d.groups.filter((x) => x && isFinite(Number(x.count)))
+    : (Array.isArray(d.parts) ? d.parts.filter((x) => x && isFinite(Number(x.value))) : []);
+  if (!groups.length) groups = contrastParts().map((x) => ({ label: x.label, count: x.count }));
+  if (!groups.length) return { x: o.cx, y: o.cy };
+  groups = groups.slice(0, 3).map((g) => ({
+    label: String(g.label || ""),
+    count: clamp(Math.round(Number(g.count != null ? g.count : g.value)), 1, 60),
+  }));
+  const total = Math.max(1, groups.reduce((a, b) => a + b.count, 0));
+  const maxC = Math.max(...groups.map((g) => g.count));
+  const cols = Math.min(8, Math.max(1, Math.ceil(Math.sqrt(maxC * 1.6))));
+  const cell = Math.min(o.w / (groups.length * cols + 1), o.h / (cols + 1), 100);
+  const block = cell * 0.82;
+  let anchor = { x: o.cx, y: o.cy };
+  g.save(); g.lineCap = "round";
+  let idx = 0;
+  groups.forEach((gr, gi) => {
+    const color = gi === 0 ? PRIMARY : (gi === 1 ? INK : ACCENT);
+    const regionW = o.w / groups.length;
+    const rx = o.cx - o.w / 2 + gi * regionW + (regionW - cols * cell) / 2;
+    const rows = Math.ceil(gr.count / cols);
+    const ry = o.cy - rows * cell / 2;
+    for (let j = 0; j < gr.count; j++) {
+      const bx = rx + (j % cols) * cell, by = ry + Math.floor(j / cols) * cell;
+      const delay = variant === "cascade" ? (j / gr.count) * 0.55 : (idx / Math.max(1, total)) * 0.4;
+      const u = prog(t, delay, delay + 0.35);
+      if (u <= 0) continue;
+      let px = bx, py = by, sc = 1;
+      if (variant === "explode") { px = o.cx + (bx - o.cx) * (0.4 + 0.6 * easeOutCubic(u)); py = o.cy + (by - o.cy) * (0.4 + 0.6 * easeOutCubic(u)); }
+      else if (variant === "cascade") py = by - (1 - easeOutBack(u)) * 260;
+      else if (variant === "grid") sc = 0.7 + 0.3 * easeOutCubic(u);
+      else if (variant === "stack") py = by + (1 - easeOutCubic(u)) * 180;
+      g.save();
+      g.translate(px + block / 2, py + block / 2);
+      g.scale(sc, sc);
+      g.translate(-(px + block / 2), -(py + block / 2));
+      roundRect(g, px, py, block, block, Math.max(4, block * 0.14));
+      g.fillStyle = rgba(color, 0.16 * clamp(u * 2.5, 0, 1)); g.fill();
+      g.lineWidth = Math.max(2, block * 0.05);
+      g.strokeStyle = rgba(color, 0.9 * clamp(u * 2.5, 0, 1)); g.stroke();
+      g.restore();
+      idx++;
+    }
+    const ly = o.cy + o.h / 2 - 70;
+    const roll = Math.round(gr.count * easeOutCubic(prog(t, 0.1, 0.9)));
+    drawText(g, String(roll), o.cx - o.w / 2 + gi * regionW + regionW / 2, ly, { size: 84, color, weight: 800, glow: 12 });
+    drawText(g, gr.label, o.cx - o.w / 2 + gi * regionW + regionW / 2, ly + 62, { size: 36, color: SLATE, weight: 600, maxW: regionW });
+    if (gi === 0) anchor = { x: o.cx - o.w / 2 + regionW / 2, y: o.cy };
+  });
+  g.restore();
+  return anchor;
+}
+
+function drawNodes(g, t, o) {
+  const d = o.data || {};
+  const variant = o.variant || "radial";
+  const nodes = treeLabels({ data: d, meta: o.meta });
+  if (!nodes.length) return { x: o.cx, y: o.cy };
+  const n = nodes.length;
+  const center = { x: o.cx, y: o.cy };
+  const radius = Math.min(o.w, o.h) * 0.34;
+  let positions = [];
+  if (variant === "chain" || variant === "pipeline") {
+    const gap = Math.min(220, o.w / (n + 1));
+    positions = nodes.map((_, i) => ({ x: o.cx - (n - 1) * gap / 2 + i * gap, y: o.cy }));
+  } else if (variant === "tree") {
+    positions = nodes.map((_, i) => ({ x: o.cx - o.w * 0.1 + (i % 2) * o.w * 0.24, y: o.cy - (n - 1) * 80 / 2 + i * 80 }));
+  } else {
+    positions = nodes.map((_, i) => {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / n;
+      return { x: center.x + Math.cos(a) * radius, y: center.y + Math.sin(a) * radius };
+    });
+  }
+  g.save(); g.lineCap = "round";
+  const cu = easeOutBack(prog(t, 0, 0.3));
+  g.beginPath(); g.arc(center.x, center.y, 70 * cu, 0, Math.PI * 2);
+  g.fillStyle = rgba(PRIMARY, 0.16); g.fill(); g.lineWidth = 5; g.strokeStyle = PRIMARY; g.stroke();
+  drawText(g, "起点", center.x, center.y, { size: 40, color: INK, weight: 800 });
+  if (variant === "pulse") {
+    for (let k = 0; k < 3; k++) {
+      const rr = 70 + ((o.time * 70 + k * 60) % 220);
+      g.globalAlpha = clamp(1 - rr / 260, 0, 1) * 0.5;
+      g.beginPath(); g.arc(center.x, center.y, rr, 0, Math.PI * 2);
+      g.strokeStyle = PRIMARY; g.lineWidth = 3; g.stroke();
+      g.globalAlpha = 1;
+    }
+  }
+  nodes.forEach((label, i) => {
+    const p = positions[i];
+    const u = easeOutCubic(prog(t, 0.15 + i * 0.08, 0.55 + i * 0.08));
+    if (u <= 0) return;
+    g.strokeStyle = rgba(PRIMARY, 0.55 * u); g.lineWidth = 4;
+    g.beginPath(); g.moveTo(center.x, center.y); g.lineTo(lerp(center.x, p.x, u), lerp(center.y, p.y, u)); g.stroke();
+    const pu = easeOutBack(prog(t, 0.3 + i * 0.08, 0.7 + i * 0.08));
+    const radial = variant === "radial" || variant === "pulse";
+    const dx = p.x - center.x, dy = p.y - center.y;
+    const dl = Math.hypot(dx, dy) || 1;
+    const lx = radial ? p.x + (dx / dl) * 84 : p.x;
+    const ly = radial ? p.y + (dy / dl) * 84 : p.y + 88;
+    g.save();
+    g.translate(p.x, p.y); g.scale(clamp(pu, 0, 1.1), clamp(pu, 0, 1.1));
+    g.beginPath(); g.arc(0, 0, 58, 0, Math.PI * 2);
+    g.fillStyle = rgba(INK, 0.08); g.fill(); g.lineWidth = 4; g.strokeStyle = rgba(PRIMARY, 0.85); g.stroke();
+    g.beginPath(); g.arc(0, 0, 10, 0, Math.PI * 2); g.fillStyle = ACCENT; g.fill();
+    drawText(g, String(i + 1), 0, 2, { size: 30, color: PRIMARY, weight: 800 });
+    drawText(g, label, lx - p.x, ly - p.y, { size: 34, color: INK, weight: 700, maxW: 240 });
+    g.restore();
+  });
+  g.restore();
+  return center;
+}
+
+function drawEye(g, t, o) {
+  const d = o.data || {};
+  const variant = o.variant || "iris";
+  const text = String(d.text || d.target || o.fallbackText || "");
+  const cx = o.cx, cy = o.cy;
+  const ew = Math.min(o.w * 0.62, 900), eh = Math.min(o.h * 0.55, 420);
+  const u = easeInOutCubic(prog(t, 0.04, 0.8));
+  const eyeH = variant === "blink" ? eh * Math.abs(Math.cos(Math.PI * clamp(prog(t, 0, 0.9), 0, 1))) : eh;
+  const R = Math.min(eyeH * 0.52, eh * 0.45);
+  g.save();
+  g.beginPath(); g.ellipse(cx, cy, ew / 2, Math.max(1, eyeH / 2), 0, 0, Math.PI * 2);
+  g.fillStyle = rgba(INK, 0.04); g.fill(); g.lineWidth = 5; g.strokeStyle = rgba(INK, 0.55); g.stroke();
+  const ir = R * (variant === "zoom" ? (0.55 + 0.45 * u) : 1);
+  const grad = g.createRadialGradient(cx, cy, 4, cx, cy, Math.max(1, ir));
+  grad.addColorStop(0, "#06080f"); grad.addColorStop(0.45, PRIMARY); grad.addColorStop(1, rgba(PRIMARY, 0.15));
+  g.beginPath(); g.arc(cx, cy, Math.max(1, ir * u), 0, Math.PI * 2); g.fillStyle = grad; g.fill();
+  g.beginPath(); g.arc(cx, cy, Math.max(1, ir * 0.36), 0, Math.PI * 2); g.fillStyle = "#06080f"; g.fill();
+  g.beginPath(); g.arc(cx - ir * 0.25, cy - ir * 0.28, Math.max(1, ir * 0.12), 0, Math.PI * 2); g.fillStyle = rgba(INK, 0.85); g.fill();
+  if (variant === "scan") {
+    const sy = cy + Math.sin(o.time * 2) * eh * 0.35;
+    g.strokeStyle = rgba(ACCENT, 0.9); g.lineWidth = 4; g.shadowColor = ACCENT; g.shadowBlur = 18;
+    g.beginPath(); g.moveTo(cx - ew / 2, sy); g.lineTo(cx + ew / 2, sy); g.stroke(); g.shadowBlur = 0;
+  }
+  if (text && !o.golden) drawText(g, text, cx, cy + eh / 2 + 70, { size: 64, color: INK, weight: 800, maxW: o.w * 0.8, glow: 14, glowColor: PRIMARY });
+  g.restore();
+  return { x: cx, y: cy };
+}
+
+function drawSplit(g, t, o) {
+  const d = o.data || {};
+  const variant = o.variant || "vertical";
+  const cp = contrastParts();
+  const L = Object.assign({ label: (cp[0] || {}).label || "", value: (cp[0] || {}).count || 0 }, d.left || {});
+  const R = Object.assign({ label: (cp[1] || {}).label || "", value: (cp[1] || {}).count || 0 }, d.right || {});
+  const lv = Math.max(0, Number(L.value) || 0), rv = Math.max(0, Number(R.value) || 0);
+  if (!L.label && !R.label && !lv && !rv) return { x: o.cx, y: o.cy };
+  const big = Math.max(lv, rv, 1), u = easeOutBack(prog(t, 0.05, 0.8));
+  g.save();
+  if (variant === "bars") {
+    const base = o.cy + o.h * 0.3, maxH = o.h * 0.55, bw = Math.min(170, o.w * 0.18);
+    [[L, lv, PRIMARY, -1], [R, rv, ACCENT, 1]].forEach(([item, val, col, side]) => {
+      const x = o.cx + side * o.w * 0.2, h = Math.max(6, (val / big) * maxH) * clamp(u, 0, 1);
+      roundRect(g, x - bw / 2, base - h, bw, h, 18); g.fillStyle = rgba(col, 0.8); g.fill();
+      drawText(g, fmtNum(val) + (item.unit || ""), x, base - h - 42, { size: 60, color: col, weight: 800, glow: 10 });
+      drawText(g, item.label || "", x, base + 50, { size: 36, color: SLATE, weight: 700, maxW: bw * 1.8 });
+    });
+    g.restore();
+    return { x: o.cx, y: base - maxH / 2 };
+  }
+  const panels = variant === "horizontal"
+    ? [{ x: o.cx, y: o.cy - o.h * 0.25, w: o.w, h: o.h * 0.4 }, { x: o.cx, y: o.cy + o.h * 0.25, w: o.w, h: o.h * 0.4 }]
+    : [{ x: o.cx - o.w * 0.25, y: o.cy, w: o.w * 0.46, h: o.h * 0.62 }, { x: o.cx + o.w * 0.25, y: o.cy, w: o.w * 0.46, h: o.h * 0.62 }];
+  [[L, lv, PRIMARY, panels[0]], [R, rv, ACCENT, panels[1]]].forEach(([item, val, col, p]) => {
+    const pu = clamp(u, 0, 1.05);
+    g.save(); g.translate(p.x, p.y); g.scale(pu, pu); g.translate(-p.x, -p.y);
+    roundRect(g, p.x - p.w / 2, p.y - p.h / 2, p.w, p.h, 26);
+    g.fillStyle = rgba(col, 0.12); g.fill(); g.lineWidth = 4; g.strokeStyle = rgba(col, 0.7); g.stroke();
+    drawText(g, item.label || "", p.x, p.y - p.h * 0.28, { size: 44, color: SLATE, weight: 700, maxW: p.w - 40 });
+    drawText(g, fmtNum(val) + (item.unit || ""), p.x, p.y + p.h * 0.14, { size: 120, color: col, weight: 800, glow: 16, maxW: p.w - 30 });
+    g.restore();
+  });
+  if (variant === "diagonal") {
+    g.strokeStyle = rgba(RED, 0.8); g.lineWidth = 5;
+    g.beginPath(); g.moveTo(o.cx - o.w * 0.5, o.cy + o.h * 0.3); g.lineTo(o.cx + o.w * 0.5, o.cy - o.h * 0.3); g.stroke();
+  }
+  g.restore();
+  return { x: o.cx, y: o.cy };
+}
+
+function drawFlow(g, t, o) {
+  const d = o.data || {};
+  const variant = o.variant || "fork";
+  let steps = Array.isArray(d.steps) ? d.steps : (Array.isArray(d.nodes) ? d.nodes : []);
+  if (!steps.length) steps = treeLabels({ data: d, meta: o.meta });
+  steps = steps.map((x) => String(x && (x.label || x.text) ? (x.label || x.text) : x)).filter(Boolean).slice(0, 6);
+  if (steps.length < 2) return { x: o.cx, y: o.cy };
+  const n = steps.length;
+  const points = [];
+  for (let i = 0; i < n; i++) {
+    if (variant === "pipeline" || variant === "zigzag") {
+      const gap = Math.min(200, o.w / (n + 1));
+      points.push({ x: o.cx - (n - 1) * gap / 2 + i * gap, y: o.cy + (variant === "zigzag" && i % 2 ? 90 : -90) });
+    } else if (variant === "loop") {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / n;
+      points.push({ x: o.cx + Math.cos(a) * Math.min(o.w, o.h) * 0.34, y: o.cy + Math.sin(a) * Math.min(o.w, o.h) * 0.34 });
+    } else {
+      const gap = Math.min(190, o.w / (n + 1));
+      const side = i % 2 ? 1 : -1;
+      points.push({ x: o.cx - (n - 1) * gap / 2 + i * gap, y: o.cy + side * 80 });
+    }
+  }
+  g.save(); g.lineCap = "round";
+  const u = easeInOutCubic(prog(t, 0.05, 0.9));
+  g.strokeStyle = rgba(PRIMARY, 0.65); g.lineWidth = 5;
+  g.beginPath();
+  points.forEach((p, i) => { if (i === 0) g.moveTo(p.x, p.y); else g.lineTo(p.x, p.y); });
+  if (variant === "loop") g.closePath();
+  g.stroke();
+  const head = Math.min(points.length - 1, Math.floor(u * (points.length - 1)));
+  steps.forEach((label, i) => {
+    const p = points[i];
+    const pu = easeOutBack(prog(t, 0.1 + i * 0.08, 0.5 + i * 0.08));
+    if (pu <= 0) return;
+    g.save(); g.translate(p.x, p.y); g.scale(clamp(pu, 0, 1.1), clamp(pu, 0, 1.1));
+    g.beginPath(); g.arc(0, 0, 48, 0, Math.PI * 2);
+    g.fillStyle = rgba(INK, 0.08); g.fill(); g.lineWidth = 4; g.strokeStyle = i === head ? ACCENT : PRIMARY; g.stroke();
+    drawText(g, String(i + 1), 0, 2, { size: 30, color: INK, weight: 800 });
+    drawText(g, label, 0, 76, { size: 34, color: INK, weight: 700, maxW: 260 });
+    g.restore();
+  });
+  glowDot(g, points[head].x, points[head].y, 14, ACCENT, 1);
+  g.restore();
+  return points[head];
+}
+
+function drawStack(g, t, o) {
+  const d = o.data || {};
+  const variant = o.variant || "tower";
+  const labels = treeLabels({ data: d, meta: o.meta });
+  const values = Array.isArray(d.values) ? d.values.map(Number).filter(isFinite) : [];
+  if (!labels.length && !values.length) return { x: o.cx, y: o.cy };
+  const n = Math.max(labels.length, values.length, 2);
+  const maxV = Math.max(1, ...values);
+  const bw = Math.min(560, o.w * 0.6), bh = Math.min(64, (o.h * 0.62) / n), base = o.cy + o.h * 0.3;
+  g.save(); g.lineCap = "round";
+  for (let i = 0; i < n; i++) {
+    const u = clamp(prog(t, 0.05 + i * 0.08, 0.4 + i * 0.08), 0, 1);
+    if (u <= 0) continue;
+    const val = values[i];
+    let x = o.cx - bw / 2, y = base - i * bh, w = bw, h = bh * 0.86;
+    if (variant === "stairs") { x = o.cx - bw / 2 + i * (o.w * 0.06); w = bw * 0.62; y = base - i * bh; }
+    else if (variant === "pyramid") { const shrink = (i / n) * 0.5; x = o.cx - bw * (1 - shrink) / 2; w = bw * (1 - shrink); }
+    else if (variant === "columns") {
+      const cw = Math.min(110, (o.w * 0.8) / n);
+      x = o.cx - (n * cw) / 2 + i * cw; w = cw * 0.7;
+      h = val != null ? Math.max(12, (val / maxV) * o.h * 0.6) : bh * 0.86;
+      y = base - h;
+    }
+    roundRect(g, x, y, w, h, Math.min(18, h * 0.25));
+    g.fillStyle = rgba(i % 2 ? ACCENT : PRIMARY, 0.2 * u); g.fill();
+    g.lineWidth = 3; g.strokeStyle = rgba(i % 2 ? ACCENT : PRIMARY, 0.85 * u); g.stroke();
+    const text = labels[i] || (val != null ? fmtNum(val) : "");
+    if (text) drawText(g, text, x + w / 2, y + h / 2, { size: Math.min(34, h * 0.55), color: INK, weight: 700, maxW: w - 20, alpha: u });
+  }
+  g.restore();
+  return { x: o.cx, y: base - bh * n / 2 };
+}
+
 const VIZ_FN = {
   line: (g, t, o) => drawLineChart(g, t, o),
   cards: (g, t, o) => drawCardGrid(g, t, o),
@@ -1265,6 +2013,12 @@ const VIZ_FN = {
   compare: (g, t, o) => drawCompare(g, t, o),
   countdown: (g, t, o) => drawCountdown(g, t, o),
   progress: (g, t, o) => drawProgressBar(g, t, o),
+  blocks: (g, t, o) => drawBlocks(g, t, o),
+  nodes: (g, t, o) => drawNodes(g, t, o),
+  eye: (g, t, o) => drawEye(g, t, o),
+  split: (g, t, o) => drawSplit(g, t, o),
+  flow: (g, t, o) => drawFlow(g, t, o),
+  stack: (g, t, o) => drawStack(g, t, o),
 };
 
 /* ============================== 场景内容 ============================== */
@@ -1278,6 +2032,14 @@ function dataOk(s, form) {
     case "radar": return Array.isArray(d.rings) && d.rings.filter((r) => r && isFinite(Number(r.value))).length >= 2;
     case "timeline": return (Array.isArray(d.milestones) && d.milestones.length >= 2) || treeLabels({ data: {}, meta }).length >= 2;
     case "countdown": return String(d.number != null ? d.number : hookNumber(s)).trim() !== "";
+    case "blocks": return (Array.isArray(d.groups) && d.groups.some((x) => x && isFinite(Number(x.count)))) ||
+      (Array.isArray(d.parts) && d.parts.length >= 2) || contrastParts().length >= 2;
+    case "nodes": return treeLabels({ data: d, meta }).length >= 2;
+    case "flow": return treeLabels({ data: d, meta }).length >= 2 || (Array.isArray(d.steps) && d.steps.length >= 2);
+    case "stack": return (Array.isArray(d.values) && d.values.filter((v) => isFinite(Number(v))).length >= 2) ||
+      treeLabels({ data: d, meta }).length >= 2;
+    case "split": return !!(d.left && d.right) || contrastParts().length >= 2;
+    case "eye": return true;
     default: return true;
   }
 }
@@ -1322,17 +2084,33 @@ function matchTimes(s, labels) {
   for (let i = 1; i < out.length; i++) if (out[i] < out[i - 1] + 0.25) out[i] = out[i - 1] + 0.25;
   return out;
 }
+const LAYOUTS = {
+  center: { cx: 0, cy: -10, w: 1560, h: 560 },
+  left: { cx: -360, cy: -10, w: 980, h: 600 },
+  right: { cx: 360, cy: -10, w: 980, h: 600 },
+  top: { cx: 0, cy: -100, w: 1500, h: 360 },
+  bottom: { cx: 0, cy: 90, w: 1500, h: 360 },
+  offset: { cx: 180, cy: -30, w: 1200, h: 520 },
+};
 function vizOpts(s, form, t) {
   const found = dataOf(s, form);
+  const lay = LAYOUTS[String(s.layout || "center")] || LAYOUTS.center;
   const o = {
-    cx: VIZ.cx, cy: VIZ.cy, w: VIZ.w, h: VIZ.h, data: found.d, time: t,
+    cx: lay.cx, cy: lay.cy, w: lay.w, h: lay.h, data: found.d, time: t,
     t0: s.start, dur: s.end - s.start, meta,
+    variant: String(s.variant || "").trim(),
+    layout: String(s.layout || "center"),
+    entrance: String(s.entrance || "scale"),
+    motion: String(s.motion_curve || "easeOutCubic"),
+    accent: ACCENT,
+    golden: String(s.role || "") === "金句",
   };
   if (form === "spotlight") {
     if (!found.el) { o.data = {}; o.fallbackText = spotlightText(s); }
     else o.fallbackText = spotlightText(s);
   }
   if (form === "countdown") o.fallbackText = hookNumber(s);
+  if (form === "eye") o.fallbackText = spotlightText(s);
   if (form === "tree") {
     const d = found.d || {};
     const labels = treeLabels({ data: d, meta });
@@ -1355,6 +2133,15 @@ function vizStart(s) {
   if (form === "line" && Array.isArray(d.points)) toks.push(String(d.points[d.points.length - 1]), String(d.points[0]));
   if (form === "radar" && Array.isArray(d.rings)) d.rings.forEach((r) => toks.push(String(r.label || "")));
   if (form === "timeline" && Array.isArray(d.milestones)) d.milestones.forEach((m) => toks.push(String((m && (m.label || m.text)) || m)));
+  if (form === "blocks") {
+    const gs = Array.isArray(d.groups) ? d.groups : (Array.isArray(d.parts) ? d.parts : []);
+    gs.forEach((g) => toks.push(String(g && (g.count != null ? g.count : g.value))));
+  }
+  if (form === "split") { if (d.left) toks.push(String(d.left.value)); if (d.right) toks.push(String(d.right.value)); }
+  if (form === "nodes" || form === "flow" || form === "stack") treeLabels({ data: d, meta }).forEach((l) => toks.push(String(l)));
+  if (form === "flow" && Array.isArray(d.steps)) d.steps.forEach((x) => toks.push(String(x)));
+  if (form === "stack" && Array.isArray(d.values)) d.values.forEach((v) => toks.push(String(v)));
+  if (form === "eye") toks.push(String(d.text || d.target || ""));
   let best = null;
   toks.filter((x) => x && x.length >= 1 && x !== "undefined").forEach((k) => {
     const c = cueTime(s, k);
@@ -1363,35 +2150,67 @@ function vizStart(s) {
   s._vs = best == null ? base : clamp(best - 0.35, base, s.start + 1.2);
   return s._vs;
 }
+function curveFn(name) {
+  switch (String(name || "")) {
+    case "easeInOutCubic": return easeInOutCubic;
+    case "easeOutBack": return easeOutBack;
+    case "smootherstep": return smootherstep;
+    default: return easeOutCubic;
+  }
+}
 function vizProgress(s, t) {
   const vs = vizStart(s);
   const span = clamp((s.end - vs) * 0.72, 1.6, 3.4);
-  return prog(t, vs, vs + span);
+  const raw = prog(t, vs, vs + span);
+  return clamp(curveFn(s.motion_curve)(raw), 0, 1.05);
 }
-function enterAnim(t, a0, dur) {
+function enterAnim(t, a0, dur, mode) {
   const u = prog(t, a0, a0 + (dur || 0.5));
-  return { u, scale: 0.88 + 0.12 * easeOutBack(u), alpha: 0.35 + 0.65 * clamp(u * 2.2, 0, 1), dy: (1 - easeOutCubic(u)) * 26 };
+  const out = {
+    u, scale: 0.88 + 0.12 * easeOutBack(u), alpha: 0.35 + 0.65 * clamp(u * 2.2, 0, 1),
+    dy: (1 - easeOutCubic(u)) * 26, dx: 0,
+  };
+  if (mode === "slide") { out.scale = 1; out.dy = (1 - easeOutCubic(u)) * 96; }
+  else if (mode === "fade") { out.scale = 1; out.dy = 0; out.alpha = clamp(u * 1.3, 0, 1); }
+  else if (mode === "wipe") { out.scale = 1; out.dy = 0; out.dx = (1 - easeOutCubic(u)) * -140; }
+  return out;
 }
 function clipSafe(g) { g.beginPath(); g.rect(-W / 2, -H / 2, W, SAFE_BOTTOM); g.clip(); }
 function drawContent(g, s, t, tc) {
   const form = formOf(s);
   const golden = String(s.role || "") === "金句";
-  const local = prog(tc, s.start, s.end);
+  const local = curveFn(s.motion_curve)(prog(tc, s.start, s.end));
   const bump = Math.sin(Math.PI * prog(tc, s.start, s.start + 0.25)) * 0.022;
-  const sc = 1 + 0.035 * local + bump;
+  const sceneAge = Math.max(0, tc - s.start);
+  const beatSpan = 2.4;
+  const beatU = (sceneAge % beatSpan) / beatSpan;
+  const beatPulse = LEGACY_MOTION ? 1 : 1 + 0.025 * Math.sin(Math.PI * clamp(beatU * 2.5, 0, 1));
+  const hookBoost = (!LEGACY_MOTION && s.i === 0) ? 1 + 0.06 * Math.sin(tc * 6) * clamp(1 - tc / 3, 0, 1) : 1;
+  const driftX = LEGACY_MOTION ? 0 : Math.sin(sceneAge * 0.9) * 12;
+  const driftY = LEGACY_MOTION ? 0 : Math.cos(sceneAge * 0.7) * 7;
+  const sc = (1 + 0.035 * local + bump) * beatPulse * hookBoost;
+  const ge = enterAnim(tc, s.start, 0.5, s.entrance);
   g.save();
   clipSafe(g);
-  g.translate(0, VIZ.cy); g.scale(sc, sc); g.translate(0, -VIZ.cy);
+  g.translate(ge.dx * 0.3 + driftX, VIZ.cy + driftY); g.scale(sc, sc); g.translate(0, -VIZ.cy);
   g.save();
   if (golden) g.globalAlpha = 0.14;
   const o = vizOpts(s, form, tc);
   VIZ_FN[form](g, vizProgress(s, tc), o);
   g.restore();
+  if (!LEGACY_MOTION && !golden && sceneAge > 0.15 && beatU < 0.32) {
+    const bu = beatU / 0.32;
+    g.strokeStyle = rgba(ACCENT, 0.6 * (1 - bu));
+    g.lineWidth = 8; g.shadowColor = ACCENT; g.shadowBlur = 18;
+    g.beginPath(); g.arc(o.cx, o.cy, 80 + 320 * easeOutCubic(bu), 0, Math.PI * 2); g.stroke();
+    g.shadowBlur = 0;
+  }
   // 文字元素：标题（主焦点）+ 一条辅助文案
   const title = s.els.find((e) => String(e.type) === "title" && e.text);
   if (title) {
     const [a, b] = elWindow(title, s);
-    const an = enterAnim(tc, a, 0.5);
+    const an = enterAnim(tc, a, 0.5, s.entrance);
+    if (!LEGACY_MOTION && s.i === 0) an.alpha = Math.max(an.alpha, 0.6);
     if (tc >= a) {
       const exit = b < s.end - 0.05 ? 1 - prog(tc, b - 0.25, b) : 1;
       const maxW = golden ? 1440 : 1560;
@@ -1399,7 +2218,7 @@ function drawContent(g, s, t, tc) {
       const col = /^#[0-9a-f]{6}$/i.test(String(title.color || "")) && String(title.color).toLowerCase() !== "#ffffff" ? title.color : INK;
       const y = (golden ? VIZ.cy - 20 : TITLE_Y) + an.dy;
       g.save();
-      g.translate(0, y); g.scale(an.scale, an.scale); g.translate(0, -y);
+      g.translate(an.dx, y); g.scale(an.scale, an.scale); g.translate(0, -y);
       drawText(g, String(title.text), 0, y, {
         size, color: col, weight: 800, maxW, alpha: an.alpha * exit,
         glow: title.pulse ? 18 + 10 * Math.sin(tc * 6) : (golden ? 26 : 10), glowColor: golden ? PRIMARY : col,
@@ -1417,7 +2236,7 @@ function drawContent(g, s, t, tc) {
     if (tc >= w2[0] && (!kw || w2[0] >= kw[0])) { kicker = e; kw = w2; }
   }
   if (kicker) {
-    const an = enterAnim(tc, kw[0], 0.45);
+    const an = enterAnim(tc, kw[0], 0.45, s.entrance);
     const exit = kw[1] < s.end - 0.05 ? 1 - prog(tc, kw[1] - 0.25, kw[1]) : 1;
     let text = String(kicker.text != null ? kicker.text : (kicker.label || ""));
     const ty = String(kicker.type || "").toLowerCase();
@@ -1425,7 +2244,7 @@ function drawContent(g, s, t, tc) {
       const v = Number(kicker.value) * easeOutCubic(prog(tc, kw[0], kw[0] + 1.1));
       text = `${kicker.label ? kicker.label + " " : ""}${fmtNum(v)}${kicker.unit || ""}`;
     }
-    drawText(g, text, 0, KICKER_Y + an.dy, { size: 40, color: SLATE, weight: 700, maxW: 1500, alpha: an.alpha * exit * 0.92 });
+    drawText(g, text, an.dx, KICKER_Y + an.dy, { size: 40, color: SLATE, weight: 700, maxW: 1500, alpha: an.alpha * exit * 0.92 });
   }
   g.restore();
 }
@@ -1489,6 +2308,7 @@ function drawMotif(g, t, st) {
 const EVENTS = (function () {
   const ev = [];
   scenes.forEach((s) => {
+    if (!LEGACY_MOTION && s.i === 0) ev.push({ t: 0, kind: "burst" });
     if (s.i > 0) ev.push({ t: s.start, kind: String(s.role) === "顿悟" ? "burst" : "ring" });
     s.beats.forEach((b) => { const bt = Number(b.t); if (isFinite(bt) && bt > s.start + 0.4) ev.push({ t: bt, kind: "tick" }); });
     s.els.forEach((e) => {
@@ -1528,9 +2348,10 @@ function drawBackground(g, t) {
   for (let y = -H / 2 - gap + off * 0.6; y < H / 2 + gap; y += gap) { g.moveTo(-W / 2, y); g.lineTo(W / 2, y); }
   g.stroke();
   const breathe = 0.5 + 0.5 * Math.sin(t * 1.6);
+  const beat = LEGACY_MOTION ? 0 : Math.sin(Math.PI * clamp((((Math.max(0, t - s.start)) % 2.4) / 2.4) * 2.5, 0, 1));
   const col = emotionColor(s);
   const glow = g.createRadialGradient(0, VIZ.cy, 80, 0, VIZ.cy, 900);
-  glow.addColorStop(0, rgba(col, 0.085 + 0.03 * breathe)); glow.addColorStop(1, rgba(col, 0));
+  glow.addColorStop(0, rgba(col, 0.085 + 0.03 * breathe + 0.025 * beat)); glow.addColorStop(1, rgba(col, 0));
   g.fillStyle = glow; g.fillRect(-W / 2, -H / 2, W, H);
   const vg = g.createRadialGradient(0, 0, 500, 0, 0, 1180);
   vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.55)");
@@ -1543,24 +2364,58 @@ function modeOf(s) {
   const m = String(s.transition_in || "").trim();
   return ["缩放推进", "图形形变", "擦除", "时间轴延伸", "知识树生长"].includes(m) ? m : "擦除";
 }
-function drawTransition(g, mode, p, A, B, anchor, idx) {
+function drawCarry(g, p, a, b, idx) {
   const e = easeInOutCubic(clamp(p, 0, 1));
-  const drawLayer = (layer, alpha) => { g.globalAlpha = clamp(alpha, 0, 1); g.drawImage(layer, -W / 2, -H / 2); g.globalAlpha = 1; };
+  const x = lerp(a.x, b.x, e), y = lerp(a.y, b.y, e);
+  const r = 26 + 34 * Math.sin(Math.PI * e);
+  const alpha = clamp(0.55 * (1 - Math.abs(e - 0.5) * 0.9), 0, 1);
   g.save();
+  g.strokeStyle = rgba(PRIMARY, alpha); g.lineWidth = 5;
+  g.shadowColor = PRIMARY; g.shadowBlur = 22;
+  g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke();
+  g.shadowBlur = 0;
+  glowDot(g, x, y, 12, PRIMARY, clamp(alpha + 0.2, 0, 1));
+  g.restore();
+}
+function drawTransition(g, mode, p, A, B, anchorA, idx, anchorB) {
+  const e = easeInOutCubic(clamp(p, 0, 1));
+  const aA = anchorA, aB = anchorB || anchorA;
+  const drawLayer = (layer, alpha) => { g.globalAlpha = clamp(alpha, 0, 1); g.drawImage(layer, -W / 2, -H / 2); g.globalAlpha = 1; };
+  const reveal = (cx, cy, r) => {
+    g.save();
+    g.beginPath(); g.arc(cx, cy, Math.max(1, r), 0, Math.PI * 2); g.clip();
+    drawLayer(layerB, 1);
+    g.restore();
+  };
+  const drawA = () => {
+    g.save();
+    g.translate((aB.x - aA.x) * 0.1 * e, (aB.y - aA.y) * 0.1 * e);
+    g.scale(1 - 0.025 * e, 1 - 0.025 * e);
+    drawLayer(layerA, 1);
+    g.restore();
+  };
+  g.save();
+  if (LEGACY_MOTION) {
+    g.globalAlpha = clamp(1 - e, 0, 1); g.drawImage(layerA, -W / 2, -H / 2);
+    g.globalAlpha = clamp(e, 0, 1); g.drawImage(layerB, -W / 2, -H / 2);
+    g.globalAlpha = 1;
+    g.restore();
+    return;
+  }
   if (mode === "缩放推进") {
     g.save();
-    g.translate(anchor.x, anchor.y); g.scale(1 + e * 2.4, 1 + e * 2.4); g.translate(-anchor.x, -anchor.y);
-    drawLayer(layerA, 1 - smootherstep(prog(e, 0.3, 0.85)));
+    g.translate(aA.x, aA.y); g.scale(1 + e * 2.4, 1 + e * 2.4); g.translate(-aA.x, -aA.y);
+    drawLayer(layerA, 1);
     g.restore();
-    g.save();
-    const sb = lerp(1.7, 1, e);
-    g.translate(anchor.x, anchor.y); g.scale(sb, sb); g.translate(-anchor.x, -anchor.y);
-    drawLayer(layerB, smootherstep(prog(e, 0.22, 0.78)));
-    g.restore();
+    const rr = easeOutCubic(e) * 1700;
+    reveal(aB.x, aB.y, rr);
+    g.strokeStyle = rgba(PRIMARY, 0.9 * (1 - e)); g.lineWidth = 8; g.shadowColor = PRIMARY; g.shadowBlur = 24;
+    g.beginPath(); g.arc(aB.x, aB.y, Math.max(1, rr), 0, Math.PI * 2); g.stroke(); g.shadowBlur = 0;
   } else if (mode === "图形形变") {
     const fa = formOf(A.s), fb = formOf(B.s);
-    drawLayer(layerA, 1 - smootherstep(prog(e, 0, 0.5)));
-    drawLayer(layerB, smootherstep(prog(e, 0.5, 1)));
+    drawA();
+    const mx = lerp(aA.x, aB.x, e), my = lerp(aA.y, aB.y, e);
+    reveal(mx, my, easeOutCubic(e) * 1700);
     const n = 64;
     const pts = morphPoints(shapePoints(fa, n), shapePoints(fb, n), p);
     const a = Math.sin(Math.PI * clamp(e, 0, 1));
@@ -1573,7 +2428,7 @@ function drawTransition(g, mode, p, A, B, anchor, idx) {
   } else if (mode === "时间轴延伸") {
     const hx = lerp(-W / 2 - 40, W / 2 + 40, e);
     g.save(); g.beginPath(); g.rect(hx, -H / 2, W, H); g.clip();
-    g.translate(-e * 80, 0); drawLayer(layerA, 1 - 0.5 * e); g.restore();
+    g.translate(-e * 80, 0); drawLayer(layerA, 1); g.restore();
     g.save(); g.beginPath(); g.rect(-W / 2, -H / 2, hx + W / 2, H); g.clip(); drawLayer(layerB, 1); g.restore();
     const ly = VIZ.cy;
     g.strokeStyle = rgba(INK, 0.9); g.lineWidth = 7; g.shadowColor = PRIMARY; g.shadowBlur = 22; g.lineCap = "round";
@@ -1582,29 +2437,29 @@ function drawTransition(g, mode, p, A, B, anchor, idx) {
     g.strokeStyle = rgba(PRIMARY, 0.7); g.lineWidth = 4;
     g.beginPath(); g.moveTo(hx, -H / 2); g.lineTo(hx, H / 2); g.stroke();
   } else if (mode === "知识树生长") {
-    drawLayer(layerA, 1 - smootherstep(prog(e, 0, 0.55)));
+    drawA();
     const r = e * 1500;
-    g.save(); g.beginPath(); g.arc(anchor.x, anchor.y, r, 0, Math.PI * 2); g.clip(); drawLayer(layerB, 1); g.restore();
+    reveal(aB.x, aB.y, r);
     g.strokeStyle = rgba(PRIMARY, 0.85); g.lineWidth = 5; g.lineCap = "round";
     const k = 5;
     for (let b = 0; b < k; b++) {
       const ang = -Math.PI / 2 + (b - (k - 1) / 2) * 0.62 + (idx % 2 ? 0.2 : -0.2);
       const len = easeOutCubic(prog(e, 0, 0.7)) * (260 + b * 40) * (1 - prog(e, 0.75, 1));
-      g.beginPath(); g.moveTo(anchor.x, anchor.y);
-      g.quadraticCurveTo(anchor.x + Math.cos(ang) * len * 0.5 + 30, anchor.y + Math.sin(ang) * len * 0.5, anchor.x + Math.cos(ang) * len, anchor.y + Math.sin(ang) * len);
+      g.beginPath(); g.moveTo(aB.x, aB.y);
+      g.quadraticCurveTo(aB.x + Math.cos(ang) * len * 0.5 + 30, aB.y + Math.sin(ang) * len * 0.5, aB.x + Math.cos(ang) * len, aB.y + Math.sin(ang) * len);
       g.stroke();
-      glowDot(g, anchor.x + Math.cos(ang) * len, anchor.y + Math.sin(ang) * len, 9, PRIMARY, 1 - prog(e, 0.75, 1));
+      glowDot(g, aB.x + Math.cos(ang) * len, aB.y + Math.sin(ang) * len, 9, PRIMARY, 1 - prog(e, 0.75, 1));
     }
     g.strokeStyle = rgba(PRIMARY, 0.9 * (1 - e)); g.lineWidth = 6;
-    g.beginPath(); g.arc(anchor.x, anchor.y, r, 0, Math.PI * 2); g.stroke();
+    g.beginPath(); g.arc(aB.x, aB.y, r, 0, Math.PI * 2); g.stroke();
   } else {
-    // 擦除：偶数边界圆形外扩，奇数边界斜线扫过；边缘带一道亮线
-    drawLayer(layerA, 1);
+    // 擦除：偶数边界圆形外扩，奇数边界斜线扫过；A 层向 B 锚点轻微推近，B 层用裁切揭示，不做淡入淡出
+    drawA();
     if (idx % 2 === 0) {
       const r = e * 1500;
-      g.save(); g.beginPath(); g.arc(anchor.x, anchor.y, r, 0, Math.PI * 2); g.clip(); drawLayer(layerB, 1); g.restore();
+      reveal(aB.x, aB.y, r);
       g.strokeStyle = rgba(PRIMARY, 0.9 * (1 - e)); g.lineWidth = 8; g.shadowColor = PRIMARY; g.shadowBlur = 24;
-      g.beginPath(); g.arc(anchor.x, anchor.y, r, 0, Math.PI * 2); g.stroke(); g.shadowBlur = 0;
+      g.beginPath(); g.arc(aB.x, aB.y, r, 0, Math.PI * 2); g.stroke(); g.shadowBlur = 0;
     } else {
       const sweep = lerp(-W / 2 - 700, W / 2 + 700, e), slant = 360;
       g.save();
@@ -1614,12 +2469,14 @@ function drawTransition(g, mode, p, A, B, anchor, idx) {
       g.beginPath(); g.moveTo(sweep + slant, -H / 2); g.lineTo(sweep - slant, H / 2); g.stroke(); g.shadowBlur = 0;
     }
   }
+  drawCarry(g, p, aA, aB, idx);
   g.restore();
 }
-function renderLayer(layerCtx, s, t, tc) {
+function renderLayer(layerCtx, s, t, tc, opaque) {
   layerCtx.setTransform(1, 0, 0, 1, 0, 0);
   layerCtx.clearRect(0, 0, W, H);
   layerCtx.translate(W / 2, H / 2);
+  if (opaque) drawBackground(layerCtx, tc);
   drawContent(layerCtx, s, t, tc);
 }
 
@@ -1635,9 +2492,10 @@ function renderTransition(t, s, nxt, p) {
   drawBackground(ctx, t);
   const st = motifAt(t);
   renderLayer(gA, s, t, Math.min(t, s.end - 0.001));
-  renderLayer(gB, nxt, t, Math.max(t, nxt.start));
-  const anchor = anchorOfScene(s, s.end);
-  drawTransition(ctx, modeOf(nxt), p, { s }, { s: nxt }, anchor, nxt.i);
+  renderLayer(gB, nxt, t, Math.max(t, nxt.start), !LEGACY_MOTION);
+  const anchorA = anchorOfScene(s, s.end);
+  const anchorB = anchorOfScene(nxt, nxt.start);
+  drawTransition(ctx, modeOf(nxt), p, { s }, { s: nxt }, anchorA, nxt.i, anchorB);
   drawMotif(ctx, t, st);
   drawImpacts(ctx, t, st);
 }
@@ -1702,6 +2560,9 @@ PROMPT_KEYS = {
     "node1-editor.md": "node1_editor",
     "node1-points.md": "node1_points",
     "node1-point-script.md": "node1_point_script",
+    "node1-script-brutal.md": "node1_script_brutal",
+    "node1-hook-candidates.md": "node1_hook_candidates",
+    "node1-hook-score.md": "node1_hook_score",
     "node2-prompt.md": "node2_prompt",
 }
 
@@ -2141,6 +3002,25 @@ def strip_fence(text):
     return re.sub(r"\n?```\s*$", "", re.sub(r"^\s*```[a-zA-Z]*\s*\n?", "", str(text or ""))).strip()
 
 
+def parse_json_payload(text):
+    """从模型输出里取出 JSON 对象/数组；容忍代码块围栏和前后解释。"""
+    t = strip_fence(str(text or "")).strip()
+    if not t:
+        return None
+    try:
+        return json.loads(t)
+    except Exception:
+        pass
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start, end = t.find(opener), t.rfind(closer)
+        if start != -1 and end > start:
+            try:
+                return json.loads(t[start:end + 1])
+            except Exception:
+                continue
+    return None
+
+
 def read_yaml(path):
     if yaml is None:
         die("缺少 PyYAML。安装：py -3 -m pip install pyyaml")
@@ -2295,6 +3175,10 @@ def load_api_key():
     raise SystemExit(1)
 
 
+# 思考模型会把 reasoning 和正文放在同一个输出预算里；用 API 思考模式的默认上限 64K。
+NODE1_MAX_TOKENS = 65536
+
+
 def resolve_deepseek_options(args, default_max_tokens=8192):
     base_url = os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     model = arg_str(args, "model") or os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL)
@@ -2442,6 +3326,26 @@ def call_deepseek(api_key, base_url, model, system_prompt, user_prompt,
     if usage:
         usage["_elapsed"] = elapsed
     return {"content": "".join(content), "reasoning": "".join(reasoning), "usage": usage}
+
+
+def call_deepseek_with_retry(label, api_key, base_url, model, system_prompt, user_prompt,
+                             max_tokens, temperature, stall_ms, response_format=None):
+    """正文为空但收到推理时，说明 max_tokens 被推理耗尽；自动加倍重试一次。"""
+    result = call_deepseek(
+        api_key, base_url, model, system_prompt, user_prompt,
+        max_tokens, temperature, stall_ms, response_format,
+    )
+    if str(result.get("content") or "").strip() or not str(result.get("reasoning") or "").strip():
+        return result
+    retry_budget = min(131072, max(65536, int(max_tokens) * 2))
+    warn(
+        f"[{label}] 仅收到推理内容（{len(result['reasoning'])} 字符），"
+        f"max_tokens={max_tokens} 已被推理耗尽；用 {retry_budget} 自动重试一次…"
+    )
+    return call_deepseek(
+        api_key, base_url, model, system_prompt, user_prompt,
+        retry_budget, temperature, stall_ms, response_format,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3075,6 +3979,169 @@ def offset_and_merge(segment_cues):
     return all_cues
 
 
+# ---------------------------------------------------------------------------
+# P0-3：字幕严格模式。
+# 旧逻辑在两条 cue 同时开始时，会把上一条截到 start+0.2s，仍可能与下一条重叠；
+# 严格模式先按标点切成 14–18 字，再强制 end_i <= start_{i+1}，保证同一时刻最多一条。
+# 由 --subs-strict 开启，默认 legacy 行为不变。
+# ---------------------------------------------------------------------------
+SUB_MIN_CHARS = 14
+SUB_MAX_CHARS = 18
+SUB_MIN_DURATION = 0.12
+SUB_SPLIT_RE = re.compile(r"[，,、；;：:。！？!?\s]")
+
+
+def count_subtitle_overlaps(cues):
+    ordered = sorted(cues, key=lambda c: (float(c.get("start") or 0), float(c.get("end") or 0)))
+    return sum(
+        1 for i in range(len(ordered) - 1)
+        if float(ordered[i].get("end") or 0) > float(ordered[i + 1].get("start") or 0) + 1e-6
+    )
+
+
+def _split_subtitle_text(text, min_chars=SUB_MIN_CHARS, max_chars=SUB_MAX_CHARS):
+    """按去标点后的正文字数切分，目标 14–18 字；标点保留在前一段末尾。"""
+    t = str(text or "").strip()
+    if not t:
+        return []
+    if narration_chars(t) <= max_chars:
+        return [t]
+    chunks, rest = [], t
+    while narration_chars(rest) > max_chars:
+        cut = -1
+        for m in SUB_SPLIT_RE.finditer(rest):
+            pos = m.start() + 1
+            n = narration_chars(rest[:pos])
+            if n > max_chars:
+                break
+            if n >= min_chars:
+                cut = pos
+        if cut < 0:
+            best_pos, best_n = 1, 0
+            for pos in range(1, len(rest) + 1):
+                n = narration_chars(rest[:pos])
+                if n <= max_chars:
+                    best_pos, best_n = pos, n
+                else:
+                    break
+            cut = best_pos
+        chunks.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    if rest:
+        chunks.append(rest)
+    # 短尾优先找一个 14–18 的均分点；找不到再合并或放宽到 12 字
+    if len(chunks) >= 2 and narration_chars(chunks[-1]) < min_chars:
+        combined = chunks[-2] + chunks[-1]
+        pair = _best_two_chunks(combined, min_chars, max_chars)
+        if pair:
+            chunks[-2:] = list(pair)
+        elif narration_chars(combined) <= max_chars + 8:
+            chunks[-2:] = [combined]
+        else:
+            pair = _best_two_chunks(combined, max(1, min_chars - 2), max_chars)
+            if pair:
+                chunks[-2:] = list(pair)
+    # 两段时若尾段超过上限，均分一下，避免 18+20 这种失衡
+    if len(chunks) == 2 and narration_chars(chunks[-1]) > max_chars:
+        combined = chunks[0] + chunks[1]
+        mid = max(1, len(combined) // 2)
+        if narration_chars(combined[:mid]) >= min_chars:
+            chunks = [combined[:mid], combined[mid:]]
+    return [c for c in chunks if c]
+
+
+def _best_two_chunks(combined, min_chars, max_chars):
+    """在 combined 里找一个切点，使两段正文字数都落在 [min_chars, max_chars]，取最均衡的。"""
+    best = None
+    for pos in range(1, len(combined)):
+        left, right = combined[:pos], combined[pos:]
+        ln, rn = narration_chars(left), narration_chars(right)
+        if min_chars <= ln <= max_chars and min_chars <= rn <= max_chars:
+            score = abs(ln - rn)
+            if best is None or score < best[0]:
+                best = (score, left, right)
+    return (best[1], best[2]) if best else None
+
+
+def _limit_subtitle_chunks(chunks, max_parts):
+    chunks = list(chunks)
+    while len(chunks) > max_parts and len(chunks) >= 2:
+        idx = min(
+            range(len(chunks) - 1),
+            key=lambda i: narration_chars(chunks[i]) + narration_chars(chunks[i + 1]),
+        )
+        chunks[idx:idx + 2] = [chunks[idx] + chunks[idx + 1]]
+    return chunks
+
+
+def split_long_subtitles(cues, min_chars=SUB_MIN_CHARS, max_chars=SUB_MAX_CHARS,
+                         min_duration=SUB_MIN_DURATION):
+    """在每条 cue 的真实起止窗口内，按字数比例切成 14–18 字的短句。"""
+    out = []
+    for cue in cues:
+        text = str(cue.get("text") or "").strip()
+        start = float(cue.get("start") or 0.0)
+        end = float(cue.get("end") or start)
+        if not text or end <= start:
+            continue
+        chunks = _split_subtitle_text(text, min_chars, max_chars)
+        span = end - start
+        max_parts = max(1, int(span / min_duration)) if min_duration > 0 else len(chunks)
+        chunks = _limit_subtitle_chunks(chunks, max_parts)
+        weights = [max(1, narration_chars(ch)) for ch in chunks]
+        total_weight = sum(weights) or 1
+        cursor = start
+        for i, (chunk, weight) in enumerate(zip(chunks, weights)):
+            if i == len(chunks) - 1:
+                s, e = cursor, end
+            else:
+                s = cursor
+                e = min(end, cursor + span * weight / total_weight)
+            if e - s < min_duration and i < len(chunks) - 1:
+                e = min(end, s + min_duration)
+            if e - s < 0.05:
+                continue
+            out.append({**cue, "start": round(s, 3), "end": round(e, 3), "text": chunk})
+            cursor = e
+    return out
+
+
+def enforce_subtitle_timing(cues, duration=None):
+    """硬约束：排序后 end_i <= start_{i+1}；过短或越界的 cue 顺延/丢弃。"""
+    ordered = sorted(cues, key=lambda c: (float(c.get("start") or 0), float(c.get("end") or 0)))
+    out = []
+    limit = float(duration) if duration is not None else None
+    for cue in ordered:
+        start = max(0.0, float(cue.get("start") or 0))
+        end = max(start, float(cue.get("end") or start))
+        if out:
+            start = max(start, out[-1]["end"])
+        if end < start + SUB_MIN_DURATION:
+            end = start + SUB_MIN_DURATION
+        if limit is not None:
+            end = min(end, limit)
+        if end - start < 0.05:
+            continue
+        out.append({**cue, "start": round(start, 3), "end": round(end, 3)})
+    return out
+
+
+def _screen_text_duplicate(text, titles):
+    """字幕是否已经被画面上的文字覆盖；只对 >=6 字的互相包含才判定重复，避免误杀短词。"""
+    t = normalize_sub_text(text)
+    if not t:
+        return False
+    for title in titles or []:
+        s = normalize_sub_text(title)
+        if not s:
+            continue
+        if t == s:
+            return True
+        if len(t) >= 6 and len(s) >= 6 and (t in s or s in t):
+            return True
+    return False
+
+
 def to_srt(cues):
     return "".join(
         f"{i + 1}\n{stamp(c['start'], ',')} --> {stamp(c['end'], ',')}\n{c['text']}\n\n"
@@ -3296,8 +4363,60 @@ MAX_MATERIAL_CHARS = 100000
 TEXT_ONLY_TYPES = {"title", "subtitle", "text", "caption", "formula", "code"}
 ACT_ROLES = ["钩子", "共情", "拆解", "顿悟", "金句"]
 # v2.1：对标爆款的视觉形态 / 转场词表（与 PROMPTS 里的表一一对应）
-VISUAL_FORMS = ["倒计时", "折线图", "卡片矩阵", "树状拆解", "圆环雷达", "时间轴", "聚焦镜头", "对比轨道", "进度条"]
+VISUAL_FORMS = [
+    "倒计时", "折线图", "卡片矩阵", "树状拆解", "圆环雷达", "时间轴", "聚焦镜头", "对比轨道", "进度条",
+    "方块拆解", "节点推演", "眼球特写", "对比分屏", "流程分支", "堆叠塔",
+]
 TRANSITION_IN = ["缩放推进", "图形形变", "擦除", "时间轴延伸", "知识树生长"]
+
+# P1-1：每种形式的变体、配色、布局、入场与运动曲线。节点1 只输出 form/variant/elements，
+# 其余维度由 assign_variation() 按 seed + history 选择，并写回脚本 JSON。
+VISUAL_FORM_VARIANTS = {
+    "倒计时": ["dial", "flip", "hourglass", "ring"],
+    "折线图": ["single", "area", "bars", "step", "dual"],
+    "卡片矩阵": ["rain", "flip", "grid", "wave"],
+    "树状拆解": ["horizontal", "vertical", "radial", "cascade"],
+    "圆环雷达": ["rings", "polygon", "dashed", "dual"],
+    "时间轴": ["horizontal", "vertical", "zigzag", "dots"],
+    "聚焦镜头": ["iris", "lens", "scan", "vignette"],
+    "对比轨道": ["tracks", "split", "bars", "mirror"],
+    "进度条": ["bar", "segments", "ring", "fill"],
+    "方块拆解": ["explode", "grid", "cascade", "stack"],
+    "节点推演": ["radial", "chain", "tree", "pulse"],
+    "眼球特写": ["iris", "scan", "zoom", "blink"],
+    "对比分屏": ["vertical", "horizontal", "diagonal", "bars"],
+    "流程分支": ["fork", "zigzag", "pipeline", "loop"],
+    "堆叠塔": ["tower", "stairs", "pyramid", "columns"],
+}
+VARIATION_LAYOUTS = ["center", "left", "right", "top", "bottom", "offset"]
+VARIATION_ENTRANCES = ["scale", "slide", "wipe", "fade"]
+VARIATION_CURVES = ["easeOutCubic", "easeInOutCubic", "easeOutBack", "smootherstep"]
+PALETTES = {
+    "midnight": {"primary": "#22d3ee", "accent": "#ef4444", "ink": "#f8fafc", "muted": "#94a3b8", "bg": "#06080f"},
+    "ember":    {"primary": "#fb923c", "accent": "#ef4444", "ink": "#fff7ed", "muted": "#c4a48a", "bg": "#0d0806"},
+    "mint":     {"primary": "#34d399", "accent": "#f59e0b", "ink": "#ecfdf5", "muted": "#8bb8a8", "bg": "#04100c"},
+    "violet":   {"primary": "#a78bfa", "accent": "#f472b6", "ink": "#f5f3ff", "muted": "#a79fc4", "bg": "#0a0714"},
+    "steel":    {"primary": "#60a5fa", "accent": "#f87171", "ink": "#eff6ff", "muted": "#93a4bd", "bg": "#060b14"},
+    "sand":     {"primary": "#eab308", "accent": "#dc2626", "ink": "#fefce8", "muted": "#b8a98a", "bg": "#0f0c05"},
+    "neon":     {"primary": "#f0abfc", "accent": "#22d3ee", "ink": "#fdf4ff", "muted": "#b79cc4", "bg": "#0b0410"},
+}
+FORM_ALTERNATIVES = {
+    "倒计时": ["聚焦镜头", "方块拆解", "卡片矩阵"],
+    "折线图": ["对比轨道", "对比分屏", "堆叠塔"],
+    "卡片矩阵": ["方块拆解", "对比分屏", "堆叠塔"],
+    "树状拆解": ["节点推演", "流程分支", "堆叠塔"],
+    "圆环雷达": ["节点推演", "聚焦镜头", "堆叠塔"],
+    "时间轴": ["流程分支", "节点推演", "对比分屏"],
+    "聚焦镜头": ["眼球特写", "节点推演", "倒计时"],
+    "对比轨道": ["对比分屏", "折线图", "堆叠塔"],
+    "进度条": ["堆叠塔", "方块拆解", "圆环雷达"],
+    "方块拆解": ["卡片矩阵", "堆叠塔", "对比分屏"],
+    "节点推演": ["树状拆解", "流程分支", "圆环雷达"],
+    "眼球特写": ["聚焦镜头", "节点推演", "倒计时"],
+    "对比分屏": ["对比轨道", "卡片矩阵", "堆叠塔"],
+    "流程分支": ["节点推演", "树状拆解", "时间轴"],
+    "堆叠塔": ["卡片矩阵", "方块拆解", "折线图"],
+}
 TRIVIAL_ELEMENT_TYPES = {
     "title", "subtitle", "text", "caption", "digits", "counter", "progress",
     "highlight", "transition", "formula", "code",
@@ -3363,9 +4482,10 @@ def _num(value):
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?|[二两三四五六七八九十百千万]+")
 
 
-def validate_viral_benchmark(meta, scenes, duration):
+def validate_viral_benchmark(meta, scenes, duration, copy_mode="legacy"):
     """对标爆款（v2.1）：文案深度 / 视觉形态 / 转场 / 场景粒度。全部是警告，不拦截流水线。"""
     w = []
+    brutal = copy_mode == "brutal"
     scene_list = [s for s in scenes if isinstance(s, dict)]
     ids = [str(s.get("id") or "?") for s in scene_list]
 
@@ -3383,11 +4503,18 @@ def validate_viral_benchmark(meta, scenes, duration):
         w.append("缺少 meta.method_steps（3–5 步可执行方法论），顿悟幕容易只剩鸡汤。")
     else:
         step_texts = [str(x).strip() for x in steps if str(x).strip()]
-        if not 3 <= len(step_texts) <= 5:
-            w.append(f"meta.method_steps 有 {len(step_texts)} 步，应为 3–5 步。")
-        too_long = [x for x in step_texts if narration_chars(x) > 10]
-        if too_long:
-            w.append(f"meta.method_steps 有步骤超过 10 字：「{too_long[0][:14]}」，方法要短到能记住。")
+        if brutal:
+            if not 5 <= len(step_texts) <= 6:
+                w.append(f"meta.method_steps 有 {len(step_texts)} 步，brutal 模式应为 5–6 步。")
+            too_long = [x for x in step_texts if narration_chars(x) > 20]
+            if too_long:
+                w.append(f"meta.method_steps 有步骤超过 20 字：「{too_long[0][:22]}」，解法要短促。")
+        else:
+            if not 3 <= len(step_texts) <= 5:
+                w.append(f"meta.method_steps 有 {len(step_texts)} 步，应为 3–5 步。")
+            too_long = [x for x in step_texts if narration_chars(x) > 10]
+            if too_long:
+                w.append(f"meta.method_steps 有步骤超过 10 字：「{too_long[0][:14]}」，方法要短到能记住。")
         insight_text = _flatten_text("".join(
             str(s.get("narration") or "") for s in scene_list if str(s.get("role") or "") == "顿悟"
         ))
@@ -3411,6 +4538,15 @@ def validate_viral_benchmark(meta, scenes, duration):
         unknown = unique([f for f in forms if f and f not in VISUAL_FORMS])
         if unknown:
             w.append(f"visual_form「{'、'.join(unknown)}」不在词表里（{' / '.join(VISUAL_FORMS)}），渲染器可能不认。")
+        for i, s in enumerate(scene_list):
+            form = forms[i]
+            variant = str(s.get("variant") or "").strip()
+            options = VISUAL_FORM_VARIANTS.get(form, [])
+            if variant and options and variant not in options:
+                w.append(
+                    f"场景 {ids[i]}：variant「{variant}」不在「{form}」的可选值里"
+                    f"（{' / '.join(options)}）。"
+                )
         distinct = {f for f in forms if f}
         if len(distinct) < 4:
             w.append(f"全片只用了 {len(distinct)} 种 visual_form，至少要 4 种，否则画面单一、容易视觉疲劳。")
@@ -3477,7 +4613,7 @@ def _grams(text, n=3):
     return {t[i:i + n] for i in range(len(t) - n + 1)}
 
 
-def validate_pacing_and_callback(meta, scenes):
+def validate_pacing_and_callback(meta, scenes, copy_mode="legacy"):
     """v2.2：张弛有度的节奏曲线 + 首尾回环（对标爆款“只剩 6 个月”开头、结尾再问一遍）。"""
     w = []
     scene_list = [s for s in scenes if isinstance(s, dict)]
@@ -3491,7 +4627,8 @@ def validate_pacing_and_callback(meta, scenes):
         acc[0] += chars
         acc[1] += b - a
     dens = {r: c / d for r, (c, d) in by_role.items() if d > 0}
-    if len(dens) >= 4:
+    # brutal 模式是“极端钩子 + 5–6 条短促解法”，密度曲线与旧五幕不同，不做匀速警告
+    if copy_mode != "brutal" and len(dens) >= 4:
         slow = [dens[r] for r in ("钩子", "共情") if r in dens]
         fast = [dens[r] for r in ("拆解", "顿悟") if r in dens]
         if slow and fast and (sum(fast) / len(fast)) < (sum(slow) / len(slow)) * 1.05:
@@ -3505,7 +4642,11 @@ def validate_pacing_and_callback(meta, scenes):
             w.append(f"金句幕密度 {gold:.1f} 字/秒高于拆解/顿悟幕，结尾应当最慢、留足余韵。")
     if len(scene_list) >= 2:
         first = str(scene_list[0].get("narration") or "")
-        last = str(scene_list[-1].get("narration") or "")
+        # 回环可能落在倒数第二幕（金句幕）或 meta.golden_line 上，不能只看最后一幕
+        last = " ".join(
+            [str(s.get("narration") or "") for s in scene_list[-2:]]
+            + [str(meta.get("golden_line") or "")]
+        )
         hook_sent = re.split(r"[。！？!?]", first)[0]
         shared_num = set(re.findall(r"\d+", hook_sent)) & set(re.findall(r"\d+", last))
         shared_gram = _grams(hook_sent) & _grams(last)
@@ -3522,6 +4663,12 @@ _CHART_NEEDS = {
     "timeline": ("milestones", "时间轴需要 milestones: [{label}…]"),
     "compare": ("left", "对比轨道需要 left / right: {label, value}（也可只写 meta.contrast）"),
     "countdown": ("number", "倒计时需要 number（也可只写 meta.hook_number）"),
+    "blocks": ("groups", "方块拆解需要 groups/parts: [{label, count}]（也可只写 meta.contrast）"),
+    "nodes": ("nodes", "节点推演需要 nodes: [步骤…]（也可只写 meta.method_steps）"),
+    "eye": ("text", "眼球特写建议写 text 作为被注视的关键词"),
+    "split": ("left", "对比分屏需要 left / right: {label, value}（也可只写 meta.contrast）"),
+    "flow": ("steps", "流程分支需要 steps/nodes: [步骤…]（也可只写 meta.method_steps）"),
+    "stack": ("values", "堆叠塔需要 values: [数字…] 或 steps（也可只写 meta.method_steps）"),
 }
 
 
@@ -3548,10 +4695,19 @@ def validate_chart_data(meta, scenes):
                 if ty == "cardgrid" and not any(_num(g.get("count")) for g in data["groups"] if isinstance(g, dict)):
                     w.append(f"场景 {sid}：卡片矩阵的 groups 里没有数字 count。")
                 continue
+            if (
+                (ty == "blocks" and data.get("parts"))
+                or (ty == "flow" and data.get("nodes"))
+                or (ty == "stack" and (data.get("steps") or data.get("nodes")))
+            ):
+                continue
             fallback_ok = (
                 (ty == "tree" and method)
                 or (ty in ("cardgrid", "compare") and str(meta.get("contrast") or "").strip())
                 or (ty == "countdown" and str(meta.get("hook_number") or "").strip())
+                or (ty in ("nodes", "flow", "stack") and method)
+                or (ty in ("blocks", "split") and str(meta.get("contrast") or "").strip())
+                or ty == "eye"
             )
             if not fallback_ok:
                 w.append(f"场景 {sid}：{msg}")
@@ -3570,6 +4726,17 @@ def validate_chart_data(meta, scenes):
 FORM_TYPE = {
     "折线图": "linechart", "卡片矩阵": "cardgrid", "树状拆解": "tree", "圆环雷达": "radar",
     "时间轴": "timeline", "聚焦镜头": "spotlight", "对比轨道": "compare", "倒计时": "countdown",
+    "进度条": "progress", "方块拆解": "blocks", "节点推演": "nodes", "眼球特写": "eye",
+    "对比分屏": "split", "流程分支": "flow", "堆叠塔": "stack",
+}
+# 新形式可以复用旧形式的结构化数据，避免 LLM 为每个新形式重写一套字段
+FORM_TYPE_ALIASES = {
+    "方块拆解": ["卡片矩阵"],
+    "节点推演": ["树状拆解"],
+    "眼球特写": ["聚焦镜头"],
+    "对比分屏": ["对比轨道"],
+    "流程分支": ["树状拆解"],
+    "堆叠塔": ["树状拆解"],
 }
 SCREEN_TEXT_TYPES = {"title", "subtitle", "text", "caption"}
 TITLE_MAX_CHARS = 14
@@ -3667,9 +4834,15 @@ def parse_contrast(contrast):
 
 def _viz_data(scene, form):
     ty = FORM_TYPE.get(form)
-    for el in (scene.get("elements") if isinstance(scene.get("elements"), list) else []):
+    elements = scene.get("elements") if isinstance(scene.get("elements"), list) else []
+    for el in elements:
         if isinstance(el, dict) and str(el.get("type") or "").lower() == ty:
             return el, (el.get("data") if isinstance(el.get("data"), dict) else el)
+    for alias in FORM_TYPE_ALIASES.get(form, []):
+        aty = FORM_TYPE.get(alias)
+        for el in elements:
+            if isinstance(el, dict) and str(el.get("type") or "").lower() == aty:
+                return el, (el.get("data") if isinstance(el.get("data"), dict) else el)
     return None, {}
 
 
@@ -3689,6 +4862,26 @@ def _viz_data_ok(form, d, meta):
         return len(d.get("milestones") or []) >= 2
     if form == "倒计时":
         return bool(str(d.get("number") or meta.get("hook_number") or "").strip())
+    if form == "方块拆解":
+        groups = d.get("groups") if isinstance(d.get("groups"), list) else d.get("parts")
+        return (isinstance(groups, list) and len([g for g in groups if g]) >= 2) or bool(parse_contrast(meta.get("contrast")))
+    if form in ("节点推演", "流程分支"):
+        nodes = d.get("nodes") if isinstance(d.get("nodes"), list) else (
+            meta.get("method_steps") if isinstance(meta.get("method_steps"), list) else []
+        )
+        return len([n for n in nodes if n]) >= 2
+    if form == "堆叠塔":
+        vals = d.get("values") if isinstance(d.get("values"), list) else []
+        if len([v for v in vals if _num(v) is not None]) >= 2:
+            return True
+        nodes = d.get("nodes") if isinstance(d.get("nodes"), list) else (
+            meta.get("method_steps") if isinstance(meta.get("method_steps"), list) else []
+        )
+        return len([n for n in nodes if n]) >= 2
+    if form == "对比分屏":
+        return bool(d.get("left") and d.get("right")) or bool(parse_contrast(meta.get("contrast")))
+    if form == "眼球特写":
+        return True
     return True
 
 
@@ -3704,6 +4897,19 @@ def _chart_key_numbers(form, d, meta):
     elif form == "折线图":
         pts = [_num(x) for x in (d.get("points") or []) if _num(x) is not None]
         nums = [float(round(pts[-1])) if abs(pts[-1]) >= 3 else pts[-1]] if pts else []   # 趋势图只核对终点（四舍五入后的数字）
+    elif form == "方块拆解":
+        gs = [g for g in (d.get("groups") or d.get("parts") or []) if isinstance(g, dict)]
+        nums = [
+            _num(g.get("count") if g.get("count") is not None else g.get("value"))
+            for g in gs
+        ] or [x["count"] for x in parse_contrast(meta.get("contrast"))]
+    elif form == "对比分屏":
+        nums = (
+            [_num((d.get("left") or {}).get("value")), _num((d.get("right") or {}).get("value"))]
+            if d.get("left") else [x["count"] for x in parse_contrast(meta.get("contrast"))]
+        )
+    elif form == "堆叠塔":
+        nums = [_num(v) for v in (d.get("values") or [])]
     return [n for n in nums if n is not None]
 
 
@@ -3738,21 +4944,33 @@ def repair_script_visuals(script):
             el, d = _viz_data(scene, form)
             if not _viz_data_ok(form, d, meta):
                 derived = None
-                if form in ("卡片矩阵", "对比轨道"):
+                if form in ("卡片矩阵", "对比轨道", "方块拆解", "对比分屏"):
                     cp = parse_contrast(meta.get("contrast"))
                     if cp and all(_narration_has_number(narration, x["count"]) for x in cp[:2]):
-                        derived = (
-                            {"type": "cardgrid", "at": [scene.get("start"), scene.get("end")], "groups": [dict(x) for x in cp[:2]]}
-                            if form == "卡片矩阵" else
-                            {"type": "compare", "at": [scene.get("start"), scene.get("end")],
-                             "left": {"label": cp[0]["label"], "value": cp[0]["count"]},
-                             "right": {"label": cp[1]["label"], "value": cp[1]["count"]}}
-                        )
-                elif form == "树状拆解":
+                        if form == "卡片矩阵":
+                            derived = {"type": "cardgrid", "at": [scene.get("start"), scene.get("end")], "groups": [dict(x) for x in cp[:2]]}
+                        elif form == "对比轨道":
+                            derived = {"type": "compare", "at": [scene.get("start"), scene.get("end")],
+                                       "left": {"label": cp[0]["label"], "value": cp[0]["count"]},
+                                       "right": {"label": cp[1]["label"], "value": cp[1]["count"]}}
+                        elif form == "方块拆解":
+                            derived = {"type": "blocks", "at": [scene.get("start"), scene.get("end")], "groups": [dict(x) for x in cp[:2]]}
+                        else:
+                            derived = {"type": "split", "at": [scene.get("start"), scene.get("end")],
+                                       "left": {"label": cp[0]["label"], "value": cp[0]["count"]},
+                                       "right": {"label": cp[1]["label"], "value": cp[1]["count"]}}
+                elif form in ("树状拆解", "节点推演", "流程分支", "堆叠塔"):
                     steps = [str(x) for x in (meta.get("method_steps") or []) if x]
                     hit = [x for x in steps if x[:2] and x[:2] in narration]
                     if len(steps) >= 2 and len(hit) >= max(2, len(steps) // 2):
-                        derived = {"type": "tree", "at": [scene.get("start"), scene.get("end")], "nodes": steps[:5]}
+                        if form == "树状拆解":
+                            derived = {"type": "tree", "at": [scene.get("start"), scene.get("end")], "nodes": steps[:5]}
+                        elif form == "节点推演":
+                            derived = {"type": "nodes", "at": [scene.get("start"), scene.get("end")], "nodes": steps[:5]}
+                        elif form == "流程分支":
+                            derived = {"type": "flow", "at": [scene.get("start"), scene.get("end")], "steps": steps[:5]}
+                        else:
+                            derived = {"type": "stack", "at": [scene.get("start"), scene.get("end")], "steps": steps[:5]}
                 elif form == "倒计时":
                     n = _numbers_in(narration)[:1]
                     if n:
@@ -3762,6 +4980,7 @@ def repair_script_visuals(script):
                     notes.append(f"场景 {sid}：「{form}」缺数据，已从 meta + 旁白补全（数字都在旁白里出现过）。")
                 else:
                     scene["visual_form"] = "聚焦镜头"
+                    scene.pop("variant", None)
                     kw = _short_keyword(scene)
                     if kw and not any(isinstance(e, dict) and e.get("type") == "spotlight" for e in els):
                         els.append({"type": "spotlight", "at": [scene.get("start"), scene.get("end")], "text": kw})
@@ -3879,7 +5098,231 @@ def validate_copy_quality(meta, scenes):
     return w
 
 
-def validate_script_content(script, requested_duration):
+# ---------------------------------------------------------------------------
+# P0-1：brutal 模式的去重、废话清理与结构校验。
+# 默认 legacy 不调用这些函数；它们只操作脚本 JSON/YAML，不生成画面代码。
+# ---------------------------------------------------------------------------
+BRUTAL_BANNED_OPEN_RE = re.compile(r"^\s*(?:大家好|今天我们来|本期视频|让我们)[^。！？!?；;]*[。！？!?；;]?\s*")
+BRUTAL_FILLER_HEAD_RE = re.compile(r"^\s*(?:总之|综上|综上所述|总而言之|所以说)\s*[，,：:]?\s*")
+BRUTAL_SO_HEAD_RE = re.compile(r"^\s*所以\s*[，,]?\s*")
+BRUTAL_FILLER_RE = re.compile(r"总之|综上|综上所述|总而言之|所以说")
+BRUTAL_FORBIDDEN_OPEN_RE = re.compile(
+    r"熬夜|加班|效率低|拖延|焦虑|抱怨|你是不是|大家好|今天|本期|让我们|有没有想过"
+)
+
+
+def resolve_copy_mode(args):
+    mode = (arg_str(args, "copy-mode") or "legacy").strip().lower()
+    if mode not in ("legacy", "brutal"):
+        die(f"未知的 --copy-mode：{mode}（可选 legacy / brutal）")
+    return mode
+
+
+def _split_sentences_keep(text):
+    """按句末标点切句，并保留标点；用于去重后原样拼回。"""
+    return [x for x in re.split(r"(?<=[。！？!?；;])", str(text or "")) if x.strip()]
+
+
+def _sync_highlights(scene):
+    narration = str(scene.get("narration") or "")
+    hl = scene.get("highlight")
+    if isinstance(hl, list):
+        kept = [str(x) for x in hl if str(x) and str(x) in narration]
+        if kept:
+            scene["highlight"] = kept
+        else:
+            scene.pop("highlight", None)
+    elif hl and str(hl) not in narration:
+        scene.pop("highlight", None)
+
+
+def strip_filler_phrases(script):
+    """删除句首套话和铺垫句；只改 narration / highlight，不动场景时间轴。"""
+    notes = []
+    if not isinstance(script, dict):
+        return script, notes
+    for scene in (script.get("scenes") if isinstance(script.get("scenes"), list) else []):
+        if not isinstance(scene, dict):
+            continue
+        original = str(scene.get("narration") or "")
+        if not original.strip():
+            continue
+        kept = []
+        for part in _split_sentences_keep(original):
+            raw = part.strip()
+            cleaned = BRUTAL_BANNED_OPEN_RE.sub("", raw)
+            cleaned = BRUTAL_FILLER_HEAD_RE.sub("", cleaned)
+            cleaned = BRUTAL_SO_HEAD_RE.sub("", cleaned).strip()
+            if cleaned:
+                kept.append(cleaned)
+            if cleaned != raw and raw:
+                notes.append(f"场景 {scene.get('id') or '?'}：删除套话「{raw[:16]}」")
+        new = "".join(kept).strip()
+        if new and new != original:
+            scene["narration"] = new
+            _sync_highlights(scene)
+    return script, notes
+
+
+def _sentence_similarity(a, b):
+    a, b = _squash(a), _squash(b)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    ga, gb = _grams(a, 3), _grams(b, 3)
+    jac = len(ga & gb) / len(ga | gb) if ga and gb else 0.0
+    lcs = _lcs_len(a, b) / min(len(a), len(b))
+    return max(jac, lcs)
+
+
+def find_near_duplicates(script, threshold=0.82, window=99):
+    """返回相近场景内的近重复句（3-gram Jaccard 与最长公共子串取最大值）。"""
+    issues = []
+    scenes = [s for s in (script.get("scenes") or []) if isinstance(s, dict)]
+    units = []
+    for si, scene in enumerate(scenes):
+        for ti, sent in enumerate(_split_sentences_keep(scene.get("narration"))):
+            units.append({
+                "scene": si, "sent": ti,
+                "sid": str(scene.get("id") or si),
+                "text": sent.strip(),
+            })
+    for i, u in enumerate(units):
+        if len(_squash(u["text"])) < 6:
+            continue
+        for j in range(i + 1, len(units)):
+            v = units[j]
+            if v["scene"] - u["scene"] > window:
+                break
+            if len(_squash(v["text"])) < 6:
+                continue
+            # 首尾回环允许重复一次（回环可能落在最后两幕）
+            if u["scene"] == 0 and v["scene"] >= len(scenes) - 2:
+                continue
+            sim = _sentence_similarity(u["text"], v["text"])
+            if sim >= threshold:
+                issues.append({
+                    "scene": v["scene"], "sid": v["sid"], "sent": v["sent"],
+                    "text": v["text"], "duplicate_of": u["sid"],
+                    "similarity": round(sim, 2),
+                })
+    return issues
+
+
+def dedupe_script_narration(script, threshold=0.82, window=99):
+    """删除较晚出现的近重复句。钩子首句、金句末句和只含一句的中间场景不删，留给编辑改稿。"""
+    removed, unresolved = [], []
+    issues = find_near_duplicates(script, threshold, window)
+    if not issues:
+        return script, removed, unresolved
+    scenes = script.get("scenes") or []
+    by_scene = {}
+    for it in issues:
+        by_scene.setdefault(it["scene"], []).append(it)
+    for si, items in by_scene.items():
+        scene = scenes[si]
+        parts = _split_sentences_keep(scene.get("narration"))
+        if not parts:
+            continue
+        protected = set()
+        if si == 0:
+            protected.add(0)
+        if si == len(scenes) - 1:
+            protected.add(len(parts) - 1)
+        remove = set()
+        by_sent = {it["sent"]: it for it in items}
+        for it in items:
+            ti = it["sent"]
+            if ti in protected or len(parts) <= 1:
+                unresolved.append(it)
+                continue
+            remove.add(ti)
+        if len(remove) >= len(parts):
+            remove = set(list(remove)[: len(parts) - 1])
+        for ti in sorted(remove, reverse=True):
+            info = by_sent.get(ti) or {}
+            removed.append({"sid": info.get("sid") or scene.get("id") or si, "scene": si, "text": parts[ti].strip()})
+            parts.pop(ti)
+        new = "".join(parts).strip()
+        if new:
+            scene["narration"] = new
+            _sync_highlights(scene)
+    return script, removed, unresolved
+
+
+def validate_brutal_structure(meta, scenes, duration):
+    """P0-1 结构自检：极端钩子 → 带年份/人物的定律 → 5–6 条解法 → 首尾回环。"""
+    w = []
+    sl = [s for s in scenes if isinstance(s, dict)]
+    if not sl:
+        return ["brutal 模式：脚本没有 scenes。"]
+    if duration < 55 or duration > 65:
+        w.append(f"brutal 模式目标 55–65 秒，当前 meta.duration={duration:g}s。")
+    too_long = []
+    for s in sl:
+        a, b = _num(s.get("start")), _num(s.get("end"))
+        if a is not None and b is not None and b - a > 5.2:
+            too_long.append(f"{s.get('id') or '?'}（{b - a:.1f}s）")
+    if too_long:
+        w.append(f"brutal 模式每个场景应 3–5 秒，以下场景过长：{'、'.join(too_long[:6])}。")
+    if not 12 <= len(sl) <= 20:
+        w.append(f"brutal 模式 55–65 秒建议 12–20 个场景，当前 {len(sl)} 个。")
+
+    first = sl[0]
+    first_nar = str(first.get("narration") or "").strip()
+    first_sent = re.split(r"[。！？!?]", first_nar)[0].strip()
+    hook_type = meta.get("hook_type")
+    hook_text = " ".join(str(x) for x in hook_type) if isinstance(hook_type, list) else str(hook_type or "")
+    if "极端假设" not in hook_text:
+        w.append("brutal 模式 meta.hook_type 必须是「极端假设」。")
+    if BRUTAL_FORBIDDEN_OPEN_RE.search(first_sent):
+        w.append(f"brutal 模式禁止日常抱怨/铺垫式开头：「{first_sent[:16]}…」。")
+    if not HOOK_STAKE_RE.search(first_sent):
+        w.append("brutal 模式第一句必须带具体数字 + 期限/代价。")
+    if narration_chars(first_sent) > HOOK_MAX_CHARS:
+        w.append(f"brutal 模式第一句 {narration_chars(first_sent)} 字，超过 {HOOK_MAX_CHARS} 字。")
+    if str(first.get("role") or "").strip() != "钩子":
+        w.append("brutal 模式第一个场景 role 必须是「钩子」。")
+
+    law = str(meta.get("law") or "").strip()
+    year = str(meta.get("law_year") or "").strip()
+    author = str(meta.get("law_author") or "").strip()
+    source = str(meta.get("law_source") or "").strip()
+    if not law:
+        w.append("brutal 模式缺少 meta.law（底层定律 / 研究）。")
+    if not re.fullmatch(r"(18|19|20)\d{2}年?", year):
+        w.append(f"brutal 模式 meta.law_year 必须是 4 位年份（当前「{year or '空'}」）。")
+    if not author:
+        w.append("brutal 模式缺少 meta.law_author（提出者 / 权威机构）。")
+    if not source:
+        w.append("brutal 模式缺少 meta.law_source（书名 / 论文名 / 实验名）。")
+
+    steps = meta.get("method_steps")
+    step_texts = [str(x).strip() for x in steps if str(x).strip()] if isinstance(steps, list) else []
+    if not 5 <= len(step_texts) <= 6:
+        w.append(f"brutal 模式 meta.method_steps 必须是 5–6 条，当前 {len(step_texts)} 条。")
+    too_long_steps = [x for x in step_texts if narration_chars(x) > 20]
+    if too_long_steps:
+        w.append(f"brutal 模式解法每条 ≤20 字，超长：{'、'.join(x[:22] for x in too_long_steps[:3])}。")
+
+    for s in sl:
+        nar = str(s.get("narration") or "")
+        m = BRUTAL_FILLER_RE.search(nar)
+        if m:
+            w.append(f"场景 {s.get('id') or '?'} 出现填充词「{m.group(0)}」，删掉。")
+        if re.search(r"(?:^|[。！？!?；;])\s*所以\s*[，,]?", nar):
+            w.append(f"场景 {s.get('id') or '?'} 以「所以」开头，改成句中衔接。")
+
+    for d in find_near_duplicates({"scenes": sl}, threshold=0.82, window=99)[:8]:
+        w.append(
+            f"场景 {d['sid']} 的「{d['text'][:16]}…」与场景 {d['duplicate_of']} "
+            f"重复（相似度 {d['similarity']}）。"
+        )
+    return w
+
+
+def validate_script_content(script, requested_duration, copy_mode="legacy"):
     """脚本内容自检：提示词是建议，这里把能机器判断的硬性要求查一遍。"""
     warnings = []
     meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
@@ -4055,7 +5498,7 @@ def validate_script_content(script, requested_duration):
                 f"场景 {s.get('id') or '?'} 有一句 {narration_chars(too_long)} 字，"
                 f"超过 {SENTENCE_MAX_CHARS} 字上限：「{too_long[:16]}…」"
             )
-        if re.match(r"^(首先|其次|然后|最后|因此|综上所述)", text):
+        if re.match(r"^(首先|其次|然后|最后|因此|综上所述)(?=[，,、：:]|$)", text):
             warnings.append(f"场景 {s.get('id') or '?'} 以连接词开头，删掉它会更像人话。")
         m = re.search(r"我们可以看|不难发现|众所周知", text)
         if m:
@@ -4127,10 +5570,12 @@ def validate_script_content(script, requested_duration):
         if missing:
             warnings.append(f"场景 {s.get('id') or '?'} 的 highlight 词没出现在旁白里：{'、'.join(missing)}")
 
-    warnings.extend(validate_viral_benchmark(meta, scenes, duration))
-    warnings.extend(validate_pacing_and_callback(meta, scenes))
+    warnings.extend(validate_viral_benchmark(meta, scenes, duration, copy_mode))
+    warnings.extend(validate_pacing_and_callback(meta, scenes, copy_mode))
     warnings.extend(validate_chart_data(meta, scenes))
     warnings.extend(validate_copy_quality(meta, scenes))
+    if copy_mode == "brutal":
+        warnings.extend(validate_brutal_structure(meta, scenes, duration))
     _, repair_notes = repair_script_visuals(script)
     warnings.extend(f"[画面数据] {n}" for n in repair_notes)
     return warnings
@@ -4279,7 +5724,307 @@ def pick_topic(rows, mode="best"):
 EDITOR_MAX_ROUNDS = 2
 
 
-def node1_editor_pass(args, opts, parsed, text, duration, topic_label=""):
+def _hook_candidate_count(args):
+    n = int(arg_num(args, "hook-candidates", 5))
+    return max(3, min(8, n))
+
+
+def _hook_forbidden(text):
+    return bool(BRUTAL_FORBIDDEN_OPEN_RE.search(str(text or "")))
+
+
+def _heuristic_hook_score(text):
+    t = str(text or "").strip()
+    s = _squash(t)
+    if not t or _hook_forbidden(t):
+        return -99.0
+    score = 0.0
+    if re.search(r"只剩|还剩|最后|一辈子|十年后|一年|个月|天|岁|生命", t):
+        score += 3
+    if re.search(r"\d|[零一二两三四五六七八九十百千万]", t):
+        score += 3
+    if 8 <= len(s) <= 22:
+        score += 2
+    if re.search(r"[？?]", t):
+        score += 1
+    return score
+
+
+def generate_hook_candidates(args, opts, topic, duration):
+    """P0-1：一次生成 N 个极端假设钩子，只接受 JSON 参数，不生成渲染代码。"""
+    count = _hook_candidate_count(args)
+    prompt_dir = arg_str(args, "prompt-dir") or None
+    system_prompt = read_prompt("node1-hook-candidates.md", prompt_dir)
+    user_prompt = (
+        f"选题：{topic}\n目标时长：{duration:g} 秒\n"
+        f"请写 {count} 个候选钩子，每个都必须能直接念出来，只输出 JSON。\n"
+        "硬性：极端假设 / 生存或终极后果；含具体数字 + 期限或代价；≤22 字；禁止日常抱怨式开头。"
+    )
+    info(f"[节点1] 生成 {count} 个候选钩子（极端假设）…")
+    try:
+        result = call_deepseek_with_retry(
+            "节点1", opts["api_key"], opts["base_url"], opts["model"],
+            system_prompt, user_prompt,
+            min(int(opts["max_tokens"]), 16384), 0.8, opts["stall_ms"],
+        )
+    except Exception as exc:
+        warn(f"[节点1] 候选钩子请求失败，改用脚本提示词直接生成：{exc}")
+        return []
+    payload = parse_json_payload(result["content"])
+    raw = payload.get("candidates") if isinstance(payload, dict) else (payload if isinstance(payload, list) else None)
+    cands = []
+    if isinstance(raw, list):
+        for i, item in enumerate(raw):
+            if isinstance(item, dict):
+                text = str(item.get("text") or item.get("hook") or "").strip()
+                angle = str(item.get("angle") or "").strip()
+            else:
+                text, angle = str(item or "").strip(), ""
+            if text:
+                cands.append({"id": i + 1, "text": text, "angle": angle})
+    if not cands:
+        for line in str(result["content"]).splitlines():
+            line = re.sub(r"^\s*(?:\d+[.、)]|[-*])\s*", "", line).strip()
+            if line and not line.startswith("{") and not line.startswith("```"):
+                cands.append({"id": len(cands) + 1, "text": line, "angle": ""})
+    cands = cands[:count]
+    if not cands:
+        warn("[节点1] 候选钩子解析失败，改用脚本提示词直接生成。")
+        return []
+    for c in cands:
+        if _hook_forbidden(c["text"]):
+            warn(f"[节点1] 候选钩子命中禁用开头，将被扣分：{c['text']}")
+    return cands
+
+
+def score_hook_candidates(args, opts, topic, candidates):
+    """P0-1：一次评分调用选出最优钩子；失败时用确定性启发式兜底。"""
+    prompt_dir = arg_str(args, "prompt-dir") or None
+    system_prompt = read_prompt("node1-hook-score.md", prompt_dir)
+    listing = "\n".join(f"{c['id']}. {c['text']}" for c in candidates)
+    user_prompt = f"选题：{topic}\n候选钩子：\n{listing}\n\n只输出 JSON。"
+    info("[节点1] 评分选钩子…")
+    scores = {}
+    winner_id = None
+    try:
+        result = call_deepseek_with_retry(
+            "节点1", opts["api_key"], opts["base_url"], opts["model"],
+            system_prompt, user_prompt,
+            min(int(opts["max_tokens"]), 8192), 0.2, opts["stall_ms"],
+        )
+        payload = parse_json_payload(result["content"])
+        if isinstance(payload, dict):
+            raw_scores = payload.get("scores")
+            if isinstance(raw_scores, list):
+                for item in raw_scores:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        sid = int(item.get("id"))
+                    except (TypeError, ValueError):
+                        continue
+                    total = item.get("total")
+                    if not isinstance(total, (int, float)):
+                        vals = [item.get(k) for k in ("impact", "curiosity", "relevance")]
+                        total = sum(float(v) for v in vals if isinstance(v, (int, float)))
+                    scores[sid] = float(total)
+            try:
+                winner_id = int(payload.get("winner_id"))
+            except (TypeError, ValueError):
+                winner_id = None
+    except Exception as exc:
+        warn(f"[节点1] 钩子评分请求失败，按启发式规则选择：{exc}")
+    if winner_id not in scores:
+        if scores:
+            winner_id = max(scores, key=lambda k: (scores[k], -k))
+        else:
+            scored = [(_heuristic_hook_score(c["text"]), -c["id"], c["id"]) for c in candidates]
+            winner_id = max(scored)[2]
+            warn("[节点1] 评分结果不可用，按启发式规则选择钩子。")
+    winner = next((c for c in candidates if c["id"] == winner_id), candidates[0])
+    return winner, scores
+
+
+def choose_hook(args, opts, topic, duration):
+    """brutal 模式入口：生成候选并评分；任何一步失败都退回普通脚本生成。"""
+    cands = generate_hook_candidates(args, opts, topic, duration)
+    if not cands:
+        return None, [], {}
+    for c in cands:
+        dim(f"  候选 {c['id']}：{c['text']}")
+    if arg_bool(args, "no-hook-score"):
+        chosen = next((c for c in cands if not _hook_forbidden(c["text"])), cands[0])
+        dim(f"  --no-hook-score：直接使用候选 {chosen['id']}")
+        return chosen, cands, {}
+    chosen, scores = score_hook_candidates(args, opts, topic, cands)
+    score_text = "、".join(f"{c['id']}号 {scores.get(c['id'], '?')}" for c in cands)
+    ok(f"[节点1] 选定钩子（评分 {score_text}）：{chosen['text']}")
+    return chosen, cands, scores
+
+
+DEFAULT_HISTORY_FILE = "output/history.json"
+DEFAULT_HISTORY_WINDOW = 10
+
+
+def _seed_to_int(seed):
+    return int(hashlib.md5(str(seed).encode("utf-8")).hexdigest()[:12], 16)
+
+
+def load_variation_history(path, window=DEFAULT_HISTORY_WINDOW):
+    if not path.exists():
+        return {"version": 1, "videos": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        warn(f"变化引擎历史无法读取，按空历史处理：{exc}")
+        return {"version": 1, "videos": []}
+    if not isinstance(data, dict) or not isinstance(data.get("videos"), list):
+        return {"version": 1, "videos": []}
+    data["videos"] = [v for v in data["videos"] if isinstance(v, dict)][-max(1, window):]
+    return data
+
+
+def save_variation_history(path, history, window=DEFAULT_HISTORY_WINDOW):
+    ensure_dir(path.parent)
+    history["version"] = 1
+    history["videos"] = [v for v in history.get("videos", []) if isinstance(v, dict)][-max(1, window):]
+    try:
+        path.write_text(json.dumps(history, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        warn(f"变化引擎历史写入失败：{exc}")
+
+
+def _form_data_ok_for_scene(scene, form, meta):
+    if form in ("聚焦镜头", "眼球特写"):
+        return True
+    _, d = _viz_data(scene, form)
+    return _viz_data_ok(form, d, meta)
+
+
+def _choose_alternative_form(scene, prev_form, meta, rng):
+    candidates = [f for f in FORM_ALTERNATIVES.get(prev_form, []) if f != prev_form]
+    ok = [f for f in candidates if _form_data_ok_for_scene(scene, f, meta)]
+    if ok:
+        return rng.choice(ok)
+    return "聚焦镜头" if prev_form != "聚焦镜头" else "眼球特写"
+
+
+def _pick_avoiding(options, prev, rng):
+    pool = [o for o in options if o != prev] or list(options)
+    return rng.choice(pool)
+
+
+def assign_variation(script, args, topic=""):
+    """P1-1：按 seed + 最近历史给每个场景分配 variant / layout / entrance / motion_curve。"""
+    if arg_bool(args, "no-variation") or not isinstance(script, dict):
+        return script, None
+    meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+    scenes = [s for s in (script.get("scenes") or []) if isinstance(s, dict)]
+    if not scenes:
+        return script, None
+
+    history_path = Path(arg_str(args, "history-file") or DEFAULT_HISTORY_FILE)
+    window = max(1, int(arg_num(args, "history-window", DEFAULT_HISTORY_WINDOW)))
+    history = load_variation_history(history_path, window)
+
+    explicit_seed = arg_str(args, "seed").strip()
+    seed = explicit_seed or hashlib.md5(
+        f"{topic or meta.get('title') or ''}{time.time_ns()}".encode("utf-8")
+    ).hexdigest()[:12]
+    rng = random.Random(_seed_to_int(seed))
+
+    recent = set()
+    recent_palettes = set()
+    for video in history.get("videos", [])[-window:]:
+        if not isinstance(video, dict):
+            continue
+        if video.get("palette"):
+            recent_palettes.add(str(video["palette"]))
+        for combo in video.get("combos", []):
+            if isinstance(combo, (list, tuple)) and len(combo) >= 2:
+                recent.add((str(combo[0]), str(combo[1])))
+
+    palette_pool = [p for p in PALETTES if p not in recent_palettes] or list(PALETTES)
+    palette_name = rng.choice(palette_pool)
+    meta["palette"] = palette_name
+
+    combos = []
+    prev_form = ""
+    prev_variant = ""
+    for i, scene in enumerate(scenes):
+        role = str(scene.get("role") or "").strip()
+        form = str(scene.get("visual_form") or "").strip()
+        if role == "金句":
+            # 金句幕用文本友好形式；连续金句幕交替聚焦/眼球，避免相邻重复和图形压标题
+            if prev_form == "聚焦镜头":
+                form, golden_variant = "眼球特写", "iris"
+            else:
+                form, golden_variant = "聚焦镜头", "vignette"
+            scene["visual_form"] = form
+            scene["variant"] = golden_variant
+        else:
+            if form not in VISUAL_FORM_VARIANTS:
+                form = "聚焦镜头"
+                scene["visual_form"] = form
+            if form == prev_form:
+                alt = _choose_alternative_form(scene, prev_form, meta, rng)
+                if alt and alt != prev_form:
+                    form = alt
+                    scene["visual_form"] = form
+        variants = VISUAL_FORM_VARIANTS.get(form, [])
+        variant = str(scene.get("variant") or "").strip()
+        if variant not in variants:
+            pool = [v for v in variants if (form, v) not in recent]
+            if not pool:
+                pool = list(variants)
+            pool = [v for v in pool if v != prev_variant] or pool
+            variant = rng.choice(pool)
+        scene["variant"] = variant
+        prev_layout = scene.get("layout") if i == 0 else scenes[i - 1].get("layout")
+        prev_entrance = scene.get("entrance") if i == 0 else scenes[i - 1].get("entrance")
+        prev_curve = scene.get("motion_curve") if i == 0 else scenes[i - 1].get("motion_curve")
+        scene["layout"] = _pick_avoiding(VARIATION_LAYOUTS, prev_layout, rng)
+        scene["entrance"] = _pick_avoiding(VARIATION_ENTRANCES, prev_entrance, rng)
+        scene["motion_curve"] = _pick_avoiding(VARIATION_CURVES, prev_curve, rng)
+        combos.append([form, variant])
+        prev_form, prev_variant = form, variant
+
+    meta["variation"] = {
+        "engine": "p1",
+        "seed": seed,
+        "palette": palette_name,
+        "historyWindow": window,
+        "combos": combos,
+    }
+    script["meta"] = meta
+    history.setdefault("videos", []).append({
+        "seed": seed,
+        "title": meta.get("title") or topic,
+        "palette": palette_name,
+        "combos": combos,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    })
+    save_variation_history(history_path, history, window)
+    return script, meta["variation"]
+
+
+def strip_variation_fields(script):
+    """--no-variation 回退：剥掉变化引擎写入的字段，恢复旧的渲染默认值。"""
+    import copy
+    if not isinstance(script, dict):
+        return script
+    sc = copy.deepcopy(script)
+    meta = sc.get("meta") if isinstance(sc.get("meta"), dict) else {}
+    for key in ("variation", "palette"):
+        meta.pop(key, None)
+    for scene in (sc.get("scenes") or []):
+        if isinstance(scene, dict):
+            for key in ("variant", "layout", "entrance", "motion_curve"):
+                scene.pop(key, None)
+    return sc
+
+
+def node1_editor_pass(args, opts, parsed, text, duration, topic_label="", copy_mode="legacy"):
     """v2.4：总编辑改稿。把机器自检的问题清单 + 初稿交给 DeepSeek 做“小改动、准改动”。
 
     返回 (parsed, text, 改动说明)。新稿问题数不比初稿少时保留初稿，避免越改越糟。
@@ -4289,8 +6034,10 @@ def node1_editor_pass(args, opts, parsed, text, duration, topic_label=""):
         return parsed, text, ""
     prompt_dir = arg_str(args, "prompt-dir") or None
     system_prompt = read_prompt("node1-editor.md", prompt_dir)
+    if copy_mode == "brutal":
+        system_prompt += "\n\n" + BRUTAL_EDITOR_SUFFIX
     best_parsed, best_text = parsed, text
-    best_issues = validate_script_content(parsed, duration)
+    best_issues = validate_script_content(parsed, duration, copy_mode)
     summary = ""
     for r in range(rounds):
         if not best_issues:
@@ -4302,8 +6049,8 @@ def node1_editor_pass(args, opts, parsed, text, duration, topic_label=""):
             f"## 机器自检发现的问题\n{listing}\n\n## 初稿 YAML\n{best_text}\n\n请按提示词改稿，只输出完整 YAML。"
         )
         try:
-            result = call_deepseek(
-                opts["api_key"], opts["base_url"], opts["model"], system_prompt, user_prompt,
+            result = call_deepseek_with_retry(
+                "节点1", opts["api_key"], opts["base_url"], opts["model"], system_prompt, user_prompt,
                 opts["max_tokens"], 0.4, opts["stall_ms"],
             )
         except Exception as exc:
@@ -4318,7 +6065,7 @@ def node1_editor_pass(args, opts, parsed, text, duration, topic_label=""):
         if not isinstance(new_parsed, dict) or not isinstance(new_parsed.get("scenes"), list) or len(new_parsed["scenes"]) < 5:
             warn("[节点1] 改稿输出缺少 scenes，保留初稿。")
             break
-        new_issues = validate_script_content(new_parsed, duration)
+        new_issues = validate_script_content(new_parsed, duration, copy_mode)
         if len(new_issues) <= len(best_issues):
             summary = f"问题 {len(best_issues)} → {len(new_issues)} 条"
             ok(f"[节点1] 改稿采纳：{summary}")
@@ -4373,6 +6120,18 @@ def node1_generate(args):
         return text, out_path
 
     duration = arg_num(args, "duration", 60)
+    copy_mode = resolve_copy_mode(args)
+    if copy_mode == "brutal" and not (55 <= duration <= 65):
+        warn(f"[节点1] brutal 模式目标 55–65 秒，请求的 {duration:g}s 已改为 60s。")
+        duration = 60
+    opts = resolve_deepseek_options(args, NODE1_MAX_TOKENS)
+    if copy_mode == "brutal" and opts["max_tokens"] < 24576:
+        warn(
+            f"[节点1] brutal 模式推理消耗较大，当前 max_tokens={opts['max_tokens']} 可能截断；"
+            "建议 --max-tokens 32768 或更高。"
+        )
+    topic_label = ""
+    chosen_hook, hook_candidates, hook_scores = None, [], {}
     prompt_dir = arg_str(args, "prompt-dir") or None
     mode = None
     system_prompt = user_prompt = out_path = ""
@@ -4385,9 +6144,18 @@ def node1_generate(args):
     elif arg_str(args, "topic"):
         mode = "script"
         out_path = str(Path(arg_str(args, "out") or "script.yaml"))
-        system_prompt = read_prompt("node1-script.md", prompt_dir)
+        topic_label = arg_str(args, "topic")
+        prompt_name = "node1-script-brutal.md" if copy_mode == "brutal" else "node1-script.md"
+        system_prompt = read_prompt(prompt_name, prompt_dir)
+        if copy_mode == "brutal":
+            chosen_hook, hook_candidates, hook_scores = choose_hook(args, opts, topic_label, duration)
+        hook_note = (
+            f"## 已选定的开头钩子（必须原样作为第一句旁白）\n{chosen_hook['text']}\n\n"
+            if chosen_hook else ""
+        )
         user_prompt = (
-            f"选题：{arg_str(args, 'topic')}\n"
+            hook_note
+            + f"选题：{topic_label}\n"
             f"时长：{duration:g} 秒\n"
             "分辨率：1920x1080，帧率：30fps\n\n"
             "请写一条完整的视频脚本，只输出 YAML。"
@@ -4410,7 +6178,8 @@ def node1_generate(args):
     elif arg_str(args, "book"):
         mode = "script"
         out_path = str(Path(arg_str(args, "out") or "script.yaml"))
-        system_prompt = read_prompt("node1-script.md", prompt_dir) + "\n\n" + read_prompt(
+        prompt_name = "node1-script-brutal.md" if copy_mode == "brutal" else "node1-script.md"
+        system_prompt = read_prompt(prompt_name, prompt_dir) + "\n\n" + read_prompt(
             "node1-point-script.md", prompt_dir
         )
         points_file = Path(arg_str(args, "book"))
@@ -4419,9 +6188,17 @@ def node1_generate(args):
         points = split_points(read_file_utf8(points_file, "知识点文件"))
         index = max(1, min(len(points), int(arg_num(args, "index", 1)))) - 1
         point = points[index]
+        topic_label = point["title"]
         info(f"[节点1] 共 {len(points)} 个知识点，使用第 {index + 1} 个：{point['title']}")
+        if copy_mode == "brutal":
+            chosen_hook, hook_candidates, hook_scores = choose_hook(args, opts, topic_label, duration)
+        hook_note = (
+            f"## 已选定的开头钩子（必须原样作为第一句旁白）\n{chosen_hook['text']}\n\n"
+            if chosen_hook else ""
+        )
         user_prompt = (
-            f"知识点：\n\n<point>\n## {point['body']}\n</point>\n\n"
+            hook_note
+            + f"知识点：\n\n<point>\n## {point['body']}\n</point>\n\n"
             f"时长：{duration:g} 秒\n分辨率：1920x1080，帧率：30fps\n\n"
             "把这个知识点写成一条完整的视频脚本，只输出 YAML。"
         )
@@ -4430,13 +6207,17 @@ def node1_generate(args):
         print(NODE1_USAGE, file=sys.stderr)
         raise SystemExit(1)
 
-    opts = resolve_deepseek_options(args, 16384)
     info(f"[节点1] 模式：{ {'topics': '生成选题', 'script': '生成脚本', 'points': '拆书知识点'}[mode] }")
+    if copy_mode == "brutal":
+        info("[节点1] 文案模式：brutal（极端钩子 → 定律+年份+人物 → 5–6 条解法 → 首尾回环）")
+    qa_note = arg_str(args, "__qa-compress-note")
+    if qa_note:
+        user_prompt += "\n\n" + qa_note
     info(f"[节点1] 模型：{opts['model']}，时长：{'—' if mode == 'topics' else f'{duration:g}s'}")
     info("[节点1] 正在请求 DeepSeek…")
     started = time.time()
-    result = call_deepseek(
-        opts["api_key"], opts["base_url"], opts["model"],
+    result = call_deepseek_with_retry(
+        "节点1", opts["api_key"], opts["base_url"], opts["model"],
         system_prompt, user_prompt,
         opts["max_tokens"], opts["temperature"], opts["stall_ms"],
     )
@@ -4446,6 +6227,12 @@ def node1_generate(args):
     text = strip_fence(content)
     if not text:
         fail("模型没有返回正文内容。")
+        if result.get("reasoning"):
+            print(
+                "  仅收到推理内容；已用更大预算自动重试一次仍为空。"
+                "请调大 --max-tokens（如 131072）或降低推理强度。",
+                file=sys.stderr,
+            )
         raise SystemExit(1)
 
     if mode == "script":
@@ -4466,10 +6253,57 @@ def node1_generate(args):
         declared = (parsed.get("meta") or {}).get("duration") if isinstance(parsed.get("meta"), dict) else None
         if declared and abs(float(declared) - duration) > 0.01:
             warn(f"脚本声明 {declared}s，与请求的 {duration:g}s 不一致。")
-        issues = validate_script_content(parsed, duration)
+        if copy_mode == "brutal":
+            meta_obj = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+            meta_obj["copy_mode"] = "brutal"
+            if chosen_hook:
+                meta_obj["hook_chosen"] = chosen_hook["text"]
+            if hook_candidates:
+                meta_obj["hook_candidates"] = [c["text"] for c in hook_candidates]
+            if hook_scores:
+                meta_obj["hook_scores"] = {str(k): v for k, v in hook_scores.items()}
+            parsed["meta"] = meta_obj
+            parsed, filler_notes = strip_filler_phrases(parsed)
+            for note in filler_notes:
+                dim(f"[节点1] {note}")
+            dedupe_threshold = float(arg_num(args, "dedupe-threshold", 0.82))
+            if not arg_bool(args, "no-dedupe"):
+                parsed, removed, unresolved = dedupe_script_narration(parsed, dedupe_threshold)
+                for r in removed:
+                    dim(f"[节点1] 去重删除：场景 {r['sid']}「{r['text'][:16]}」")
+                for u in unresolved:
+                    warn(f"[节点1] 去重未处理（需改稿）：场景 {u['sid']}「{u['text'][:16]}…」")
+            text = yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False, width=240, default_flow_style=None)
+        issues = validate_script_content(parsed, duration, copy_mode)
         if issues:
-            parsed, text, _summary = node1_editor_pass(args, opts, parsed, text, duration, arg_str(args, "topic"))
-            issues = validate_script_content(parsed, duration)
+            parsed, text, _summary = node1_editor_pass(
+                args, opts, parsed, text, duration, topic_label, copy_mode
+            )
+            if copy_mode == "brutal":
+                parsed, _ = strip_filler_phrases(parsed)
+                if not arg_bool(args, "no-dedupe"):
+                    parsed, _, _ = dedupe_script_narration(parsed, dedupe_threshold)
+                text = yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False, width=240, default_flow_style=None)
+            issues = validate_script_content(parsed, duration, copy_mode)
+        if not arg_bool(args, "no-variation"):
+            parsed, variation = assign_variation(parsed, args, topic_label)
+            if variation:
+                text = yaml.safe_dump(
+                    parsed, allow_unicode=True, sort_keys=False, width=240, default_flow_style=None
+                )
+                issues = validate_script_content(parsed, duration, copy_mode)
+                ok(
+                    f"[节点1] 变化引擎：seed {variation['seed']}，配色 {variation['palette']}，"
+                    f"形式 {' → '.join(c[0] for c in variation['combos'])}"
+                )
+        else:
+            stripped = strip_variation_fields(parsed)
+            if stripped != parsed:
+                parsed = stripped
+                text = yaml.safe_dump(
+                    parsed, allow_unicode=True, sort_keys=False, width=240, default_flow_style=None
+                )
+                issues = validate_script_content(parsed, duration, copy_mode)
         for w in issues:
             warn(f"[节点1] {w}")
     elif mode == "topics":
@@ -4510,6 +6344,16 @@ NODE1_USAGE = """
   --out <文件>       输出路径（默认见上）
   --duration <秒>    视频时长，默认 60（45 秒装不下“定律 + 对比 + 方法论”）
   --model <名称>     deepseek-v4-pro / deepseek-flash
+  --copy-mode legacy|brutal
+                     brutal = 极端钩子 + 定律年份人物 + 5–6 条解法 + 首尾回环 + 去重（默认 legacy）
+  --hook-candidates 5      brutal 模式生成的候选钩子数（默认 5）
+  --no-hook-score          跳过评分，直接用第一个候选
+  --dedupe-threshold 0.82  近重复句判定阈值
+  --no-dedupe              关闭近重复句删除
+  --seed xxx               变化引擎种子（同一脚本 + seed 可复现）
+  --no-variation           关闭变化引擎，回到旧行为
+  --history-file <文件>    变化历史，默认 output/history.json
+  --history-window 10      参考最近 N 个视频
 """
 
 
@@ -4692,12 +6536,14 @@ def print_theme_names():
         print("  - " + n)
 
 
-def build_template_html(script, theme_name="midnight"):
+def build_template_html(script, theme_name="midnight", legacy_motion=False):
     """v2.2：把脚本 JSON 嵌进固定的、经过实测的渲染运行时，直接得到 HTML（不调用 LLM）。"""
     theme = get_theme(theme_name)
     meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
-    primary = str(meta.get("primary") or theme.get("accent") or "#22d3ee")
-    bg = str(meta.get("background") or theme.get("bg") or "#06080f")
+    palette_name = str(meta.get("palette") or "").strip()
+    palette = PALETTES.get(palette_name) or {}
+    primary = str(palette.get("primary") or meta.get("primary") or theme.get("accent") or "#22d3ee")
+    bg = str(palette.get("bg") or meta.get("background") or theme.get("bg") or "#06080f")
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", primary):
         primary = "#22d3ee"
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", bg):
@@ -4708,7 +6554,10 @@ def build_template_html(script, theme_name="midnight"):
         bg = "#06080f"
     script, _notes = repair_script_visuals(script)   # v2.4：数据不够就降级，不画假图；画面文字只留关键词
     script_json = json.dumps(script, ensure_ascii=False, default=str).replace("</", "<\\/")
-    theme_json = json.dumps({"primary": primary, "bg": bg}, ensure_ascii=False)
+    theme_json = json.dumps(
+        {"primary": primary, "bg": bg, "palette": palette, "legacyMotion": bool(legacy_motion)},
+        ensure_ascii=False,
+    )
     runtime = TEMPLATE_RUNTIME_JS.replace("__SCRIPT_JSON__", script_json).replace("__THEME_JSON__", theme_json)
     title = str(meta.get("title") or "video").replace("<", "&lt;")
     return (
@@ -4721,8 +6570,8 @@ def build_template_html(script, theme_name="midnight"):
     )
 
 
-def node2_template(script_path, out_path, theme_name, parsed):
-    html = build_template_html(parsed, theme_name)
+def node2_template(script_path, out_path, theme_name, parsed, legacy_motion=False):
+    html = build_template_html(parsed, theme_name, legacy_motion)
     for note in repair_script_visuals(parsed)[1]:
         warn(f"[节点2] 画面修复：{note}")
     ensure_dir(out_path.parent)
@@ -4734,9 +6583,16 @@ def node2_template(script_path, out_path, theme_name, parsed):
             ok(f"  {c['name']}")
         else:
             warn(f"  {c['name']}{' — ' + c['detail'] if c.get('detail') else ''}")
-    forms = [str(s.get("visual_form") or "").strip() for s in parsed.get("scenes", []) if isinstance(s, dict)]
-    dim("  各场景图形：" + " → ".join(f or "?" for f in forms))
-    ok("[节点2] 完成（画面语言统一：深色底 + 白线 + 青色主线 + 红色警示 + 一个贯穿全片的发光点）。")
+    forms = [
+        f"{str(s.get('visual_form') or '?').strip()}/{str(s.get('variant') or '-').strip()}"
+        for s in parsed.get("scenes", []) if isinstance(s, dict)
+    ]
+    dim("  各场景图形：" + " → ".join(forms))
+    meta_obj = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+    palette_name = str(meta_obj.get("palette") or "").strip()
+    if palette_name:
+        dim(f"  变化引擎配色：{palette_name}")
+    ok("[节点2] 完成（画面语言统一：深色底 + 白线 + 主色主线 + 警示红 + 一个贯穿全片的发光点）。")
     return html, str(out_path)
 
 
@@ -4755,13 +6611,15 @@ def node2_generate(args):
         parsed_t = read_yaml(script_path)
         if not isinstance(parsed_t, dict) or not isinstance(parsed_t.get("scenes"), list) or not parsed_t["scenes"]:
             die("脚本缺少 scenes 数组。")
+        if arg_bool(args, "no-variation"):
+            parsed_t = strip_variation_fields(parsed_t)
         theme_t = arg_str(args, "theme") or "midnight"
         try:
             theme_block(theme_t)
         except KeyError as exc:
             die(exc.args[0] if exc.args else str(exc))
         info(f"[节点2] 模式：模板渲染（默认）。想让 DeepSeek 自由写渲染器，加 --node2-mode llm")
-        return node2_template(script_path, out_path, theme_t, parsed_t)
+        return node2_template(script_path, out_path, theme_t, parsed_t, arg_bool(args, "legacy-motion"))
 
     base_prompt = read_prompt("node2-prompt.md", prompt_dir)
     theme_name = arg_str(args, "theme") or "midnight"
@@ -4797,8 +6655,8 @@ def node2_generate(args):
     info("[节点2] 正在请求 DeepSeek，长脚本可能需要几分钟…")
 
     started = time.time()
-    result = call_deepseek(
-        opts["api_key"], opts["base_url"], opts["model"],
+    result = call_deepseek_with_retry(
+        "节点2", opts["api_key"], opts["base_url"], opts["model"],
         system_prompt, user_prompt,
         opts["max_tokens"], opts["temperature"], opts["stall_ms"],
     )
@@ -4913,8 +6771,187 @@ def _launch_chromium(p):
         return p.chromium.launch(headless=True, args=["--no-sandbox"], executable_path=exe)
 
 
+def _node_version():
+    code, out = try_capture(["node", "-v"], timeout=15)
+    m = re.search(r"v(\d+)\.(\d+)\.(\d+)", out or "")
+    return tuple(int(x) for x in m.groups()) if code == 0 and m else None
+
+
+def _npm_bin():
+    return shutil.which("npm.cmd") or shutil.which("npm") or ""
+
+
+def _node_version_ok(version):
+    if not version:
+        return False
+    major, minor, _ = version
+    if major >= 24:
+        return True
+    if major == 22:
+        return minor >= 13
+    if major == 20:
+        return minor >= 19
+    return False
+
+
+def _remotion_cli(remotion_dir):
+    bin_dir = remotion_dir / "node_modules" / ".bin"
+    candidates = (
+        [bin_dir / "remotion.cmd", bin_dir / "remotion"]
+        if os.name == "nt" else [bin_dir / "remotion", bin_dir / "remotion.cmd"]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+
+def render_remotion(args):
+    """节点3（Remotion 后端）：script.yaml → props.json → npx remotion render。"""
+    script_path = Path(arg_str(args, "script") or "script.yaml")
+    if not script_path.exists():
+        raise RuntimeError(f"找不到脚本：{script_path.resolve()}")
+    script = read_yaml(script_path)
+    if not isinstance(script, dict) or not isinstance(script.get("scenes"), list):
+        raise RuntimeError("脚本缺少 scenes，无法生成 Remotion props。")
+    meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+    duration = _num(meta.get("duration")) or 0
+    if duration <= 0:
+        raise RuntimeError("脚本 meta.duration 缺失或非法，无法确定 Remotion 时长。")
+
+    out_dir = Path(arg_str(args, "out") or "output")
+    if arg_str(args, "silent"):
+        silent_path = Path(arg_str(args, "silent"))
+    elif arg_str(args, "name"):
+        silent_path = out_dir / (sanitize_title(arg_str(args, "name")) + "_silent.mp4")
+    else:
+        silent_path = out_dir / (base_name_from_script(script, str(script_path)) + "_silent.mp4")
+    ensure_dir(silent_path.parent)
+
+    remotion_dir = Path(arg_str(args, "remotion-dir") or "remotion-video").resolve()
+    if not (remotion_dir / "package.json").exists():
+        raise RuntimeError(
+            f"找不到 Remotion 项目：{remotion_dir}\n"
+            "  处理：--remotion-dir 指向固定模板目录，或先创建并 npm install。"
+        )
+    if not (remotion_dir / "node_modules" / "@remotion" / "cli").exists():
+        raise RuntimeError(
+            f"Remotion 依赖未安装：{remotion_dir / 'node_modules'}\n"
+            f"  处理：cd {remotion_dir} && npm install"
+        )
+    node_version = _node_version()
+    if not _node_version_ok(node_version):
+        shown = ".".join(str(x) for x in node_version) if node_version else "未检测到"
+        raise RuntimeError(f"Remotion 需要 Node 20.19+ / 22.13+ / 24+，当前：{shown}")
+
+    palette_name = str(meta.get("palette") or "").strip()
+    primary = str(meta.get("primary") or "#22d3ee")
+    bg = str(meta.get("background") or "#06080f")
+    palette = dict(PALETTES.get(palette_name) or {})
+    if palette:
+        primary = str(palette.get("primary") or primary)
+        bg = str(palette.get("bg") or bg)
+    else:
+        palette = {
+            "primary": primary,
+            "accent": "#ef4444",
+            "ink": "#f8fafc",
+            "muted": "#94a3b8",
+            "bg": bg,
+        }
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", primary):
+        primary = "#22d3ee"
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", bg):
+        bg = "#06080f"
+    palette["primary"] = primary
+    palette["bg"] = bg
+
+    fps = int(max(1, min(60, int(arg_num(args, "remotion-fps", meta.get("fps") or 30)))))
+    props = {
+        "fps": fps,
+        "width": 1920,
+        "height": 1080,
+        "duration": float(duration),
+        "script": script,
+        "theme": {
+            "primary": primary,
+            "bg": bg,
+            "palette": palette,
+            "legacyMotion": arg_bool(args, "legacy-motion"),
+        },
+        "seed": (meta.get("variation") or {}).get("seed")
+        if isinstance(meta.get("variation"), dict) else None,
+    }
+    props_path = Path(arg_str(args, "props") or (silent_path.with_suffix(".props.json")))
+    ensure_dir(props_path.parent)
+    props_path.write_text(json.dumps(props, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    composition = arg_str(args, "remotion-composition") or "ScriptVideo"
+    crf = float(arg_num(args, "remotion-crf", 18))
+    scale = float(arg_num(args, "remotion-scale", 1))
+    image_format = (arg_str(args, "remotion-image-format") or "png").lower()
+    concurrency = int(arg_num(args, "remotion-concurrency", 0))
+    browser = arg_str(args, "remotion-browser") or os.environ.get("REMOTION_BROWSER_EXECUTABLE", "")
+
+    cli = _remotion_cli(remotion_dir)
+    if cli:
+        cmd = [cli]
+    else:
+        cmd = ["npx", "--no-install", "remotion"]
+    cmd += [
+        "render", composition, str(silent_path.resolve()),
+        f"--props={props_path.resolve()}",
+        "--codec=h264",
+        "--pixel-format=yuv420p",
+        f"--crf={crf:g}",
+        f"--scale={scale:g}",
+        f"--image-format={image_format}",
+        "--overwrite",
+        "--log=error",
+    ]
+    if concurrency > 0:
+        cmd.append(f"--concurrency={concurrency}")
+    if browser:
+        cmd.append(f"--browser-executable={browser}")
+
+    info(f"[节点3] Remotion 后端：{composition} → {rel(silent_path)}")
+    dim(f"  props：{rel(props_path)}（{duration:g}s @ {fps}fps，CRF {crf:g}，scale {scale:g}）")
+    started = time.time()
+    run_cmd(cmd, cwd=remotion_dir)
+    if not silent_path.exists():
+        raise RuntimeError(f"Remotion 未产出文件：{silent_path}")
+    final_duration = probe_duration(silent_path)
+    elapsed = time.time() - started
+    ok(
+        f"[节点3] Remotion 完成 → {silent_path.resolve()}（"
+        f"{f'{final_duration:.2f}s' if final_duration else '?'}，"
+        f"{human_size(silent_path.stat().st_size)}，耗时 {elapsed:.1f}s）"
+    )
+    if final_duration and abs(final_duration - duration) > 0.5:
+        warn(
+            f"[节点3] Remotion 成片时长 {final_duration:.2f}s 与脚本 {duration:.2f}s 不一致，"
+            "节点4 可能发生音画错位。"
+        )
+    return str(silent_path), {
+        "fps": fps,
+        "totalFrames": round(duration * fps),
+        "duration": final_duration,
+    }
+
+
 def render_frames(args):
-    """节点3：渲染 HTML 为逐帧 PNG，并合成无声视频。"""
+    """节点3：渲染 HTML 为逐帧 PNG，并合成无声视频；或分派 Remotion 后端。"""
+    backend = (arg_str(args, "render-backend") or "canvas").strip().lower()
+    if backend not in ("canvas", "remotion"):
+        die(f"未知的 --render-backend：{backend}（可选 canvas / remotion）")
+    if backend == "remotion":
+        try:
+            return render_remotion(args)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            warn(f"[节点3] Remotion 渲染失败，自动回退 Canvas：{exc}")
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -5288,6 +7325,48 @@ def prosody_for(emotion, base_rate, base_pitch_hz, enabled=True):
     return fmt_rate(base_rate + shift["rate"]), fmt_pitch(base_pitch_hz + shift["pitch"])
 
 
+# P0-2：音色预设。默认 default 与旧行为完全一致；deep 更慢、更低。
+VOICE_PRESETS = {
+    "default": {"voice": DEFAULT_VOICE, "rate": DEFAULT_RATE, "pitch": DEFAULT_PITCH},
+    "deep": {"voice": "zh-CN-YunyangNeural", "rate": "0%", "pitch": "-10Hz"},
+}
+
+
+def resolve_voice_settings(args):
+    """返回 (voice, rate, pitch, preset_name)；显式 --voice/--rate/--pitch 优先于预设。"""
+    preset_name = (arg_str(args, "voice-preset") or "default").strip().lower()
+    preset = VOICE_PRESETS.get(preset_name)
+    if preset is None:
+        die(f"未知的 --voice-preset：{preset_name}（可选 {' / '.join(VOICE_PRESETS)}）")
+    voice = arg_str(args, "voice") or preset["voice"]
+    rate = arg_str(args, "rate") or preset["rate"]
+    pitch = arg_str(args, "pitch") or preset["pitch"]
+    return voice, rate, pitch, preset_name
+
+
+def resolve_voice_layer_options(args):
+    """P0-2：配音分层参数。默认关闭，关闭时返回值不会被使用。"""
+    layers = arg_bool(args, "voice-layers")
+    gap = float(arg_num(args, "sentence-gap", 0.45))
+    lead_in = float(arg_num(args, "hook-lead-in", 0.6))
+    return {
+        "voice_layers": layers,
+        "sentence_gap_s": max(0.1, min(1.5, gap)),
+        "hook_lead_in": max(0.0, min(2.0, lead_in)),
+    }
+
+
+def fit_duration_speedup(requested, total, rate_s, max_extra=35):
+    """P0-2 选 1：总时长超过目标 10% 时，返回 (fitted_rate, extra_percent) 或 None。"""
+    requested = float(requested or 0)
+    total = float(total or 0)
+    if requested <= 0 or total <= requested * 1.10:
+        return None
+    extra = int(math.ceil((total / requested - 1) * 100))
+    extra = max(1, min(int(max_extra), extra))
+    return fmt_rate(parse_rate_percent(rate_s) + extra), extra
+
+
 def run_edge_tts(tts, txt_file, voice, rate_s, pitch_s, mp3_file, srt_file):
     # 用 --rate=-4% 的等号写法：负数写成两个参数会被 argparse 当成新选项而报错。
     cmd = list(tts["parts"]) + [
@@ -5306,7 +7385,8 @@ def run_edge_tts(tts, txt_file, voice, rate_s, pitch_s, mp3_file, srt_file):
 
 
 def synthesize_voice(segments, tts, voice, rate, tmp_dir, audio_dir, normalize_text=True,
-                     pitch=DEFAULT_PITCH, voice_style=True, sentence_mode=True):
+                     pitch=DEFAULT_PITCH, voice_style=True, sentence_mode=True,
+                     voice_layers=False, sentence_gap_s=0.45, hook_lead_in=0.6):
     ensure_dir(tmp_dir)
     ensure_dir(audio_dir)
     base_rate = parse_rate_percent(rate)
@@ -5324,9 +7404,22 @@ def synthesize_voice(segments, tts, voice, rate, tmp_dir, audio_dir, normalize_t
         sys.stdout.write(f"\r  [节点4] 配音 {i + 1}/{len(segments)}（场景 {seg['sceneId']}）{preview}          ")
         sys.stdout.flush()
         seg_rate, seg_pitch = prosody_for(seg.get("emotion"), base_rate, base_pitch, voice_style)
+        sentences = split_sentences(spoken) if sentence_mode else [spoken]
+        labels = resolve_sentence_labels(
+            seg, sentences, is_final=(i == len(segments) - 1), enabled=voice_layers
+        )
         cache_file = Path(tmp_dir) / f"voice_{tag}.cache.json"
         cache_key = {"voice": voice, "rate": seg_rate, "pitch": seg_pitch, "text": spoken,
                      "mode": "sent2" if sentence_mode else "scene"}
+        if voice_layers:
+            # 旧缓存键不含这些字段，保证 legacy 缓存继续命中
+            cache_key.update({
+                "layers": True,
+                "sentences": sentences,
+                "labels": labels,
+                "gap": round(float(sentence_gap_s), 3),
+                "leadIn": round(float(hook_lead_in), 3),
+            })
         reused, fitted = False, False
         if mp3_file.exists() and srt_file.exists() and cache_file.exists():
             try:
@@ -5338,8 +7431,13 @@ def synthesize_voice(segments, tts, voice, rate, tmp_dir, audio_dir, normalize_t
             except Exception:
                 reused = False
         if not reused:
-            proc = render_scene_voice(tts, voice, spoken, seg_rate, seg_pitch, mp3_file, srt_file,
-                                      tmp_dir, tag, seg.get("emotion"), sentence_mode)
+            proc = render_scene_voice(
+                tts, voice, spoken, seg_rate, seg_pitch, mp3_file, srt_file,
+                tmp_dir, tag, seg.get("emotion"), sentence_mode,
+                role=seg.get("role") or "", sentences=sentences, labels=labels,
+                voice_layers=voice_layers, sentence_gap_s=sentence_gap_s,
+                hook_lead_in=hook_lead_in,
+            )
             if proc.returncode != 0:
                 sys.stdout.write("\n")
                 raise RuntimeError(
@@ -5360,8 +7458,13 @@ def synthesize_voice(segments, tts, voice, rate, tmp_dir, audio_dir, normalize_t
                 fit_rate = fmt_rate(parse_rate_percent(seg_rate) + extra)
                 fit_mp3 = Path(audio_dir) / f"voice_{tag}.fit.mp3"
                 fit_srt = Path(tmp_dir) / f"voice_{tag}.fit.srt"
-                retry = render_scene_voice(tts, voice, spoken, seg_rate, seg_pitch, fit_mp3, fit_srt,
-                                           tmp_dir, tag + "f", seg.get("emotion"), sentence_mode, extra=extra)
+                retry = render_scene_voice(
+                    tts, voice, spoken, seg_rate, seg_pitch, fit_mp3, fit_srt,
+                    tmp_dir, tag + "f", seg.get("emotion"), sentence_mode, extra=extra,
+                    role=seg.get("role") or "", sentences=sentences, labels=labels,
+                    voice_layers=voice_layers, sentence_gap_s=sentence_gap_s,
+                    hook_lead_in=hook_lead_in,
+                )
                 new_duration = probe_duration(fit_mp3) if retry.returncode == 0 and fit_mp3.exists() else None
                 if new_duration and new_duration < duration:
                     os.replace(fit_mp3, mp3_file)
@@ -5409,6 +7512,8 @@ def synthesize_voice(segments, tts, voice, rate, tmp_dir, audio_dir, normalize_t
             "rate": seg_rate,
             "pitch": seg_pitch,
             "fitted": fitted,
+            "sentenceLabels": labels,
+            "voiceLayers": voice_layers,
         })
     sys.stdout.write("\n")
     sys.stdout.flush()
@@ -5465,19 +7570,101 @@ def sentence_gap(sentence, idx, total):
     return gap
 
 
+# ---------------------------------------------------------------------------
+# P0-2：句级标签与分层韵律。
+# hook：钩子句，慢而低；argument：论证，略快；command：祈使句，短促有力；
+# closing：结尾，最慢最沉。默认 legacy 不启用。
+# ---------------------------------------------------------------------------
+SENTENCE_LABELS = {"hook", "argument", "command", "closing"}
+IMPERATIVE_RE = re.compile(
+    r"(把|别|先|只|立刻|马上|每天|砍掉|砍到|设个|设一个|拆成|拆开|停掉|删掉|关掉|"
+    r"抓住|放弃|拒绝|干掉|清空|切成|列成|记下|定在|戒掉|少买|少刷|只做|只留)"
+)
+LABEL_PROSODY = {
+    "hook": {"rate": -5, "pitch": -2},
+    "argument": {"rate": 2, "pitch": 0},
+    "command": {"rate": 3, "pitch": -1},
+    "closing": {"rate": -6, "pitch": -3},
+}
+LABEL_GAP_OFFSET = {"hook": 0.15, "argument": -0.05, "command": -0.15, "closing": 0.05}
+
+
+def resolve_sentence_labels(seg, sentences, is_final=False, enabled=False):
+    """优先用脚本里的 sentence_labels（长度匹配时），否则按场景 role + 句式判定。"""
+    if not enabled:
+        return [""] * len(sentences)
+    explicit = seg.get("sentenceLabels") if isinstance(seg.get("sentenceLabels"), list) else []
+    if len(explicit) == len(sentences) and all(
+        str(x).strip().lower() in SENTENCE_LABELS for x in explicit
+    ):
+        return [str(x).strip().lower() for x in explicit]
+    role = str(seg.get("role") or "").strip()
+    labels = []
+    for i, sent in enumerate(sentences):
+        if role == "钩子" and i == 0:
+            label = "hook"
+        elif role == "金句" or (role != "钩子" and is_final and i == len(sentences) - 1):
+            label = "closing"
+        elif role == "顿悟" or (
+            spoken_char_count(sent) <= 20 and IMPERATIVE_RE.search(sent)
+        ):
+            label = "command"
+        else:
+            label = "argument"
+        labels.append(label)
+    return labels
+
+
+def layered_sentence_prosody(sentence, idx, total, label, emotion, rate_s, pitch_s, extra=0):
+    """在情绪韵律之上叠加句级标签：钩子/结尾更慢更低，论证略快，祈使句短促。"""
+    r = parse_rate_percent(rate_s) + extra
+    p = parse_pitch_hz(pitch_s)
+    shift = LABEL_PROSODY.get(label) or {"rate": 0, "pitch": 0}
+    r += shift["rate"]
+    p += shift["pitch"]
+    if re.search(r"[？?]$", sentence):
+        p += 1
+        r -= 1
+    if re.search(r"\d", sentence):
+        r -= 2
+    return fmt_rate(r), fmt_pitch(p)
+
+
+def layered_sentence_gap(label, base_gap):
+    """标签化句间静音：默认 base=0.45 → hook 0.60 / argument 0.40 / command 0.30 / closing 0.50。"""
+    offset = LABEL_GAP_OFFSET.get(label, 0.0)
+    return round(max(0.25, min(0.80, float(base_gap) + offset)), 3)
+
+
 def render_scene_voice(tts, voice, spoken, rate_s, pitch_s, mp3_file, srt_file, tmp_dir, tag,
-                       emotion="", sentence_mode=True, extra=0):
+                       emotion="", sentence_mode=True, extra=0, role="", sentences=None,
+                       labels=None, voice_layers=False, sentence_gap_s=0.45, hook_lead_in=0.6):
     """生成一个场景的配音 + 字幕。返回带 returncode / stderr 的对象（与 run_edge_tts 同形）。"""
     import types
-    sentences = split_sentences(spoken) if sentence_mode else [spoken]
-    if len(sentences) < 2:
+    sent_list = sentences or (split_sentences(spoken) if sentence_mode else [spoken])
+    label_list = [str(x) for x in labels] if isinstance(labels, list) else []
+    if len(label_list) != len(sent_list):
+        label_list = [""] * len(sent_list)
+    first_label = label_list[0] if label_list else ""
+    lead_in = float(hook_lead_in) if (voice_layers and first_label == "hook") else 0.0
+    if len(sent_list) < 2 and lead_in <= 0:
         txt = Path(tmp_dir) / f"voice_{tag}.txt"
         txt.write_text(spoken, encoding="utf-8")
-        rate_use = fmt_rate(parse_rate_percent(rate_s) + extra) if extra else rate_s
-        return run_edge_tts(tts, txt, voice, rate_use, pitch_s, mp3_file, srt_file)
+        if voice_layers:
+            rate_use, pitch_use = layered_sentence_prosody(
+                sent_list[0], 0, 1, first_label, emotion, rate_s, pitch_s, extra
+            )
+        else:
+            rate_use = fmt_rate(parse_rate_percent(rate_s) + extra) if extra else rate_s
+            pitch_use = pitch_s
+        return run_edge_tts(tts, txt, voice, rate_use, pitch_use, mp3_file, srt_file)
     pieces = []
-    for i, sent in enumerate(sentences):
-        r_s, p_s = sentence_prosody(sent, i, len(sentences), emotion, rate_s, pitch_s, extra)
+    for i, sent in enumerate(sent_list):
+        label = label_list[i] if i < len(label_list) else ""
+        if voice_layers:
+            r_s, p_s = layered_sentence_prosody(sent, i, len(sent_list), label, emotion, rate_s, pitch_s, extra)
+        else:
+            r_s, p_s = sentence_prosody(sent, i, len(sent_list), emotion, rate_s, pitch_s, extra)
         txt = Path(tmp_dir) / f"voice_{tag}_s{i}.txt"
         mp3 = Path(tmp_dir) / f"voice_{tag}_s{i}.mp3"
         srt = Path(tmp_dir) / f"voice_{tag}_s{i}.srt"
@@ -5486,23 +7673,33 @@ def render_scene_voice(tts, voice, spoken, rate_s, pitch_s, mp3_file, srt_file, 
         if proc.returncode != 0 or not mp3.exists():
             return proc
         pieces.append({"sent": sent, "mp3": mp3, "srt": srt, "dur": probe_duration(mp3) or 0.0})
-    # 拼接：句间补静音（apad），再 concat
-    inputs, chain, labels = [], [], []
+    # 拼接：钩子首句可前置留白（adelay），句间补静音（apad），再 concat
+    inputs, chain, concat_labels = [], [], []
     for i, pc in enumerate(pieces):
         inputs += ["-i", str(pc["mp3"])]
         last = i == len(pieces) - 1
-        gap = 0.0 if last else sentence_gap(pc["sent"], i, len(pieces))
+        if voice_layers:
+            gap = 0.0 if last else layered_sentence_gap(
+                label_list[i] if i < len(label_list) else "", sentence_gap_s
+            )
+        else:
+            gap = 0.0 if last else sentence_gap(pc["sent"], i, len(pieces))
         pc["gap"] = gap
-        chain.append(f"[{i}:a]aformat=sample_rates=24000:channel_layouts=mono" + (f",apad=pad_dur={gap:.3f}" if gap else "") + f"[p{i}]")
-        labels.append(f"[p{i}]")
-    graph = ";".join(chain) + ";" + "".join(labels) + f"concat=n={len(pieces)}:v=0:a=1[o]"
+        filters = "aformat=sample_rates=24000:channel_layouts=mono"
+        if i == 0 and lead_in > 0:
+            filters += f",adelay={int(round(lead_in * 1000))}:all=1"
+        if gap:
+            filters += f",apad=pad_dur={gap:.3f}"
+        chain.append(f"[{i}:a]{filters}[p{i}]")
+        concat_labels.append(f"[p{i}]")
+    graph = ";".join(chain) + ";" + "".join(concat_labels) + f"concat=n={len(pieces)}:v=0:a=1[o]"
     cmd = [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error"] + inputs + [
         "-filter_complex", graph, "-map", "[o]", "-c:a", "libmp3lame", "-q:a", "2", str(mp3_file),
     ]
     code, out = try_capture(cmd, timeout=120)
     if code != 0 or not Path(mp3_file).exists():
         return types.SimpleNamespace(returncode=code or 1, stderr=f"句级拼接失败：{(out or '')[-400:]}")
-    cues, cursor = [], 0.0
+    cues, cursor = [], lead_in
     for pc in pieces:
         sub = parse_srt(Path(pc["srt"]).read_text(encoding="utf-8")) if Path(pc["srt"]).exists() else []
         if not sub:
@@ -5829,24 +8026,72 @@ def retime_script_to_voice(args):
             "narration": str(scene.get("narration")).strip(), "start": 0.0, "sceneEnd": None,
             "highlights": [], "role": str(scene.get("role") or ""), "emotion": str(scene.get("emotion") or ""),
             "titleTexts": [],
+            "sentenceLabels": (
+                [str(x) for x in scene.get("sentence_labels")]
+                if isinstance(scene.get("sentence_labels"), list) else []
+            ),
         })
     if not segments:
         return False
-    voice = arg_str(args, "voice") or DEFAULT_VOICE
-    rate = arg_str(args, "rate") or DEFAULT_RATE
-    pitch = arg_str(args, "pitch") or DEFAULT_PITCH
+    voice, rate, pitch, preset_name = resolve_voice_settings(args)
+    layer_opts = resolve_voice_layer_options(args)
     audio_dir = ensure_dir(Path(arg_str(args, "audio-dir") or "audio"))
     info(f"[节点1.5] 先配音 {len(segments)} 段，再按真实时长重排场景（音色 {voice}，语速 {rate}，音高 {pitch}）")
-    voiced = synthesize_voice(
-        segments, tts, voice, rate, audio_dir / ".txt", audio_dir,
-        normalize_text=not arg_bool(args, "no-text-normalize"),
-        pitch=pitch, voice_style=not arg_bool(args, "no-voice-style"),
-        sentence_mode=not arg_bool(args, "no-sentence-prosody"),
+    if layer_opts["voice_layers"]:
+        dim(
+            f"  配音分层：hook/argument/command/closing；句间静音 "
+            f"{layer_opts['sentence_gap_s']:.2f}s；钩子前留白 {layer_opts['hook_lead_in']:.2f}s；"
+            f"预设 {preset_name}"
+        )
+    def _run_voice(rate_value):
+        return synthesize_voice(
+            segments, tts, voice, rate_value, audio_dir / ".txt", audio_dir,
+            normalize_text=not arg_bool(args, "no-text-normalize"),
+            pitch=pitch, voice_style=not arg_bool(args, "no-voice-style"),
+            sentence_mode=not arg_bool(args, "no-sentence-prosody"),
+            voice_layers=layer_opts["voice_layers"],
+            sentence_gap_s=layer_opts["sentence_gap_s"],
+            hook_lead_in=layer_opts["hook_lead_in"],
+        )
+
+    def _voice_durations(voiced_list):
+        return {v["index"]: v["duration"] for v in voiced_list if v.get("duration")}
+
+    def _voice_cues(voiced_list):
+        return {
+            v["index"]: [
+                {"start": c["start"], "end": c["end"], "text": c["text"]}
+                for c in v.get("cues", [])
+            ]
+            for v in voiced_list
+        }
+
+    voiced = _run_voice(rate)
+    requested = _num(meta.get("duration_requested")) or _num(meta.get("duration")) or 0
+    new_scenes, total = retime_scenes(
+        script["scenes"], _voice_durations(voiced), _voice_cues(voiced)
     )
-    durations = {v["index"]: v["duration"] for v in voiced if v.get("duration")}
-    cues = {v["index"]: [{"start": c["start"], "end": c["end"], "text": c["text"]} for c in v.get("cues", [])] for v in voiced}
-    requested = _num(meta.get("duration")) or 0
-    new_scenes, total = retime_scenes(script["scenes"], durations, cues)
+
+    fit_info = None
+    if not arg_bool(args, "no-fit-duration") and requested:
+        fit = fit_duration_speedup(
+            requested, total, rate, arg_num(args, "fit-max-speedup", 35)
+        )
+        if fit:
+            fit_rate, extra = fit
+            before = total
+            info(f"[节点1.5] 目标 {requested:g}s，当前 {total:g}s，整体加速 {extra}% 重录一次…")
+            rate = fit_rate
+            voiced = _run_voice(rate)
+            new_scenes, total = retime_scenes(
+                script["scenes"], _voice_durations(voiced), _voice_cues(voiced)
+            )
+            fit_info = {"requested": requested, "before": before, "after": total, "extra": extra}
+            ok(f"[节点1.5] 适配后：{before:g}s → {total:g}s（目标 {requested:g}s，语速 {rate}）")
+            if total > requested * 1.15:
+                warn(f"加速后仍比目标长 {total - requested:.0f}s；可调大 --fit-max-speedup 或精简文案。")
+        else:
+            dim(f"[节点1.5] 时长 {total:g}s 在目标 {requested:g}s ±10% 内，无需适配。")
 
     backup = script_path.with_name(script_path.stem + ".pre-retime" + script_path.suffix)
     if not backup.exists():
@@ -5855,6 +8100,12 @@ def retime_script_to_voice(args):
     meta["duration_requested"] = requested or None
     meta["duration"] = total
     meta["retimed"] = True
+    if fit_info:
+        meta["voice_rate"] = rate
+        meta["voice_fit"] = fit_info
+    else:
+        meta.pop("voice_rate", None)
+        meta.pop("voice_fit", None)
     script = {**script, "meta": meta, "scenes": new_scenes}
     script_path.write_text(
         yaml.safe_dump(script, allow_unicode=True, sort_keys=False, width=240, default_flow_style=None),
@@ -5887,10 +8138,10 @@ NODE4_NO_TTS = """
 def audio_generate(args):
     """节点4：逐场景配音 + 字幕 + BGM 混音，返回成片路径与清单路径。"""
     script_path = Path(arg_str(args, "script") or "script.yaml")
-    voice = arg_str(args, "voice") or DEFAULT_VOICE
-    rate = arg_str(args, "rate") or DEFAULT_RATE
-    pitch = arg_str(args, "pitch") or DEFAULT_PITCH
+    voice, rate, pitch, preset_name = resolve_voice_settings(args)
+    layer_opts = resolve_voice_layer_options(args)
     voice_style = not arg_bool(args, "no-voice-style")
+    no_loudnorm = arg_bool(args, "no-loudnorm")
     no_sfx = arg_bool(args, "no-sfx")
     no_voice_fx = arg_bool(args, "no-voice-fx")
     no_arc = arg_bool(args, "no-bgm-arc")
@@ -5908,6 +8159,13 @@ def audio_generate(args):
     if not isinstance(script, dict) or not isinstance(script.get("scenes"), list):
         die("脚本缺少 scenes 数组。")
     meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+    meta_rate = str(meta.get("voice_rate") or "").strip()
+    if meta_rate and not arg_str(args, "rate"):
+        rate = meta_rate
+        dim(f"  使用节点1.5 适配语速：{rate}")
+    elif meta_rate and arg_str(args, "rate"):
+        if arg_str(args, "rate").replace(" ", "") != meta_rate.replace(" ", ""):
+            warn(f"显式 --rate {arg_str(args, 'rate')} 与节点1.5 适配语速 {meta_rate} 不一致，可能破坏音画同步。")
 
     base = base_name_from_script(script, str(script_path), arg_str(args, "name"))
     out_dir = Path(arg_str(args, "out-dir") or "output")
@@ -5954,6 +8212,10 @@ def audio_generate(args):
             "role": str(scene.get("role") or ""),
             "emotion": str(scene.get("emotion") or ""),
             "titleTexts": title_texts,
+            "sentenceLabels": (
+                [str(x) for x in scene.get("sentence_labels")]
+                if isinstance(scene.get("sentence_labels"), list) else []
+            ),
         })
         cursor = scene_end if scene_end is not None else start
 
@@ -5974,6 +8236,12 @@ def audio_generate(args):
     info(f"[节点4] 音色：{voice}，基准语速：{rate}，基准音高：{pitch}，共 {len(segments)} 段旁白")
     dim(f"  情绪韵律：{'开启（焦虑低沉 / 共情放缓 / 拆解清晰 / 顿悟坚定 / 金句缓重；超窗自动加速）' if voice_style else '关闭'}")
     dim(f"  旁白文本规范化：{'开启（统一标点 / 补呼吸停顿）' if normalize_text else '关闭'}")
+    if layer_opts["voice_layers"]:
+        dim(
+            f"  配音分层：hook/argument/command/closing；句间静音 "
+            f"{layer_opts['sentence_gap_s']:.2f}s；钩子前留白 {layer_opts['hook_lead_in']:.2f}s；"
+            f"预设 {preset_name}"
+        )
 
     audio_dir = ensure_dir(Path(arg_str(args, "audio-dir") or "audio"))
     tmp_dir = audio_dir / ".txt"
@@ -5981,6 +8249,9 @@ def audio_generate(args):
         segments, tts, voice, rate, tmp_dir, audio_dir, normalize_text,
         pitch=pitch, voice_style=voice_style,
         sentence_mode=not arg_bool(args, "no-sentence-prosody"),
+        voice_layers=layer_opts["voice_layers"],
+        sentence_gap_s=layer_opts["sentence_gap_s"],
+        hook_lead_in=layer_opts["hook_lead_in"],
     )
     if voice_style:
         seen = {}
@@ -6017,6 +8288,19 @@ def audio_generate(args):
     burn_subs = False
     if subs_mode != "none":
         sub_cues = offset_and_merge([{"cues": v["cues"], "start": v["start"]} for v in voice_files])
+        strict_subs = not arg_bool(args, "subs-legacy")
+        if strict_subs and sub_cues:
+            raw_count = len(sub_cues)
+            overlaps_before = count_subtitle_overlaps(sub_cues)
+            sub_cues = split_long_subtitles(sub_cues)
+            sub_cues = enforce_subtitle_timing(sub_cues, video_duration)
+            overlaps_after = count_subtitle_overlaps(sub_cues)
+            info(
+                f"[节点4] 字幕严格模式：{raw_count} 句 → {len(sub_cues)} 条（14–18 字），"
+                f"重叠 {overlaps_before} → {overlaps_after}"
+            )
+            if overlaps_after:
+                warn("字幕严格模式仍有重叠，请检查字幕时间轴。")
         if sub_cues:
             sub_base = out_path.stem
             srt_path = out_path.parent / (sub_base + ".srt")
@@ -6028,18 +8312,22 @@ def audio_generate(args):
             ass_cues = []
             for c in sub_cues:
                 titles = c.get("titleTexts") if isinstance(c.get("titleTexts"), list) else []
-                text = normalize_sub_text(c.get("text"))
-                if not any(text and normalize_sub_text(t) == text for t in titles):
-                    ass_cues.append(c)
+                if strict_subs:
+                    if not _screen_text_duplicate(c.get("text"), titles):
+                        ass_cues.append(c)
+                else:
+                    text = normalize_sub_text(c.get("text"))
+                    if not any(text and normalize_sub_text(t) == text for t in titles):
+                        ass_cues.append(c)
             if len(ass_cues) < len(sub_cues):
-                dim(f"  {len(sub_cues) - len(ass_cues)} 条字幕与画面大标题同文，跳过烧录（台词稿仍保留）。")
+                dim(f"  {len(sub_cues) - len(ass_cues)} 条字幕与画面文字重复，跳过烧录（台词稿仍保留）。")
 
             if subs_mode == "burn":
                 if not has_ass_filter():
                     warn("当前 ffmpeg 不带 libass（ass 滤镜），无法烧录特效字幕，退回 sidecar 字幕。")
                     dim("  处理：换用带 libass 的 ffmpeg，或显式加 --subs sidecar 跳过烧录。")
                 elif not ass_cues:
-                    dim("  所有字幕都与画面大标题同文，本次不烧录字幕。")
+                    dim("  所有字幕都与画面文字重复，本次不烧录字幕。")
                 else:
                     ass_path = out_path.parent / (sub_base + ".ass")
                     ass_path.write_text(to_ass(ass_cues), encoding="utf-8")
@@ -6228,13 +8516,16 @@ def audio_generate(args):
             filters.append(f"{''.join(sf_labels)}amix=inputs={len(sf_labels)}:duration=longest:normalize=0[sfx]")
         mix_inputs.append("[sfx]")
 
+    final_label = "a" if no_loudnorm else "a_pre"
     if len(mix_inputs) > 1:
         filters.append(
             f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=longest:normalize=0,"
-            f"alimiter=limit=0.95[a]"
+            f"alimiter=limit=0.95[{final_label}]"
         )
     else:
-        filters.append("[voice]anull[a]")
+        filters.append(f"[voice]anull[{final_label}]")
+    if not no_loudnorm:
+        filters.append("[a_pre]loudnorm=I=-14:TP=-1.5:LRA=11[a]")
 
     extras = []
     if has_bgm:
@@ -6252,7 +8543,7 @@ def audio_generate(args):
         "-filter_complex", ";".join(filters),
         "-map", video_map, "-map", "[a]",
     ] + video_encode + [
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-t", f"{video_duration:.3f}", "-movflags", "+faststart",
         str(out_path),
     ]
@@ -6273,6 +8564,11 @@ def audio_generate(args):
             "voice": voice, "rate": rate, "pitch": pitch,
             "voiceStyle": voice_style, "textNormalized": normalize_text,
             "voiceFx": not no_voice_fx,
+            "voicePreset": preset_name,
+            "voiceLayers": layer_opts["voice_layers"],
+            "sentenceGap": layer_opts["sentence_gap_s"] if layer_opts["voice_layers"] else None,
+            "hookLeadIn": layer_opts["hook_lead_in"] if layer_opts["voice_layers"] else None,
+            "loudnorm": None if no_loudnorm else -14,
         },
         "sfx": {
             "enabled": not no_sfx,
@@ -6307,6 +8603,10 @@ def audio_generate(args):
                 "fitted": v.get("fitted", False),
                 "narration": v["narration"],
                 "originalNarration": v["narrationOriginal"],
+                **(
+                    {"sentenceLabels": v.get("sentenceLabels", [])}
+                    if layer_opts["voice_layers"] else {}
+                ),
             }
             for v in voice_files
         ],
@@ -6834,6 +9134,11 @@ def qa_run(args):
                 dim(f"    情绪韵律：开启（焦虑低沉 / 共情放缓 / 拆解清晰 / 顿悟坚定 / 金句缓重），基准音高 {tts.get('pitch', '+0Hz')}")
             else:
                 W("  配音未启用情绪韵律（--no-voice-style），语气会偏平。")
+            if tts.get("voiceLayers"):
+                dim(
+                    f"    配音分层：hook/argument/command/closing（句间静音 "
+                    f"{tts.get('sentenceGap')}s，钩子前留白 {tts.get('hookLeadIn')}s）"
+                )
         if isinstance(manifest.get("sfx"), dict):
             sfx = manifest["sfx"]
             if sfx.get("enabled") and sfx.get("cues"):
@@ -7060,6 +9365,163 @@ def qa_run(args):
     else:
         dim("  未找到同名 .ass（可能用了 --subs sidecar / --no-subs，或 ffmpeg 不支持 libass）。")
 
+    if not arg_bool(args, "qa-legacy"):
+        print()
+        info("[节点5] P1-3 硬检查：")
+        checks = []
+
+        def check(name, passed, detail, hard=True):
+            checks.append({"name": name, "pass": bool(passed), "detail": detail, "hard": bool(hard)})
+            line = f"  {name}：{detail}"
+            if passed:
+                P(line)
+            elif hard:
+                F(line)
+            else:
+                W(line)
+
+        srt_path = video_path.with_suffix(".srt")
+        if srt_path.exists():
+            try:
+                cues = parse_srt(srt_path.read_text(encoding="utf-8", errors="replace"))
+                overlaps = count_subtitle_overlaps(cues)
+                check("字幕重叠", overlaps == 0, f"{len(cues)} 条，重叠 {overlaps} 处", hard=True)
+            except Exception as exc:
+                check("字幕重叠", False, f"SRT 解析失败：{exc}", hard=True)
+        else:
+            check("字幕重叠", True, "无 SRT（--no-subs 或未生成）", hard=False)
+
+        try:
+            picked = pick_analysis_video(
+                video_path, duration, arg_str(args, "pacing-video"), arg_str(args, "silent")
+            )
+            pacing3 = analyze_pacing(
+                picked["video"], static_limit=3.0, crop_bottom=picked["cropBottom"]
+            )
+            over = pacing3.get("overLimit") or []
+            detail = "无超过 3 秒的静止段" if not over else "、".join(
+                f"{g['start']:.1f}–{g['end']:.1f}s（{g['duration']:.1f}s）" for g in over[:4]
+            )
+            check("静止超过3秒", not over, detail, hard=True)
+        except Exception as exc:
+            check("静止超过3秒", False, f"分析失败：{str(exc).splitlines()[0]}", hard=False)
+
+        hook_ok, hook_detail = False, "脚本无法解析"
+        if isinstance(script, dict) and isinstance(script.get("scenes"), list) and script["scenes"]:
+            first_scene = script["scenes"][0] if isinstance(script["scenes"][0], dict) else {}
+            role = str(first_scene.get("role") or "")
+            early = [
+                el for el in (first_scene.get("elements") or [])
+                if isinstance(el, dict)
+                and isinstance(el.get("at"), list) and el["at"]
+                and _num(el["at"][0]) is not None and float(el["at"][0]) <= 3.0
+                and str(el.get("type") or "") not in TEXT_ONLY_TYPES
+            ]
+            meta_obj = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+            hook_number = str(meta_obj.get("hook_number") or "").strip()
+            hook_ok = role == "钩子" and bool(early) and bool(hook_number)
+            hook_detail = (
+                f"role={role or '?'}，前3秒非文字元素={len(early)}，"
+                f"hook_number={hook_number or '空'}"
+            )
+        check("前3秒钩子元素", hook_ok, hook_detail, hard=True)
+
+        loudness = None
+        try:
+            proc = subprocess.run(
+                [ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(video_path),
+                 "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            m = re.search(r"\{[\s\S]*?\"input_i\"[\s\S]*?\}", proc.stdout or "")
+            if m:
+                loudness = float(json.loads(m.group(0)).get("input_i"))
+        except Exception:
+            loudness = None
+        if loudness is None:
+            check("响度 -14 LUFS", True, "无法测量，跳过", hard=False)
+        else:
+            check(
+                "响度 -14 LUFS",
+                -16.0 <= loudness <= -12.0,
+                f"{loudness:.1f} LUFS（目标 -14±2）",
+                hard=True,
+            )
+
+        try:
+            proc = subprocess.run(
+                [ffmpeg_bin(), "-hide_banner", "-i", str(video_path),
+                 "-vf", "blackdetect=d=0.5:pix_th=0.10", "-an", "-f", "null", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            hits = re.findall(r"black_start:([\d.]+) black_end:([\d.]+)", proc.stdout or "")
+            detail = "未检测到 ≥0.5s 黑帧" if not hits else "、".join(f"{a}–{b}s" for a, b in hits[:4])
+            check("无黑帧", not hits, detail, hard=True)
+        except Exception as exc:
+            check("无黑帧", False, f"检测失败：{str(exc).splitlines()[0]}", hard=False)
+
+        dmin = float(arg_num(args, "qa-duration-min", 55))
+        dmax = float(arg_num(args, "qa-duration-max", 65))
+        if duration is None:
+            check("时长 55–65 秒", False, "无法读取时长", hard=True)
+        else:
+            check(
+                "时长 55–65 秒",
+                dmin <= duration <= dmax,
+                f"{duration:.2f}s（要求 {dmin:g}–{dmax:g}s）",
+                hard=True,
+            )
+
+        meta_obj = script.get("meta") if isinstance(script, dict) and isinstance(script.get("meta"), dict) else {}
+        variation = meta_obj.get("variation") if isinstance(meta_obj.get("variation"), dict) else None
+        if variation and isinstance(variation.get("combos"), list) and variation["combos"]:
+            history_path = Path(arg_str(args, "history-file") or DEFAULT_HISTORY_FILE)
+            window = max(1, int(arg_num(args, "history-window", DEFAULT_HISTORY_WINDOW)))
+            history = load_variation_history(history_path, window)
+            current_seed = str(variation.get("seed") or "")
+
+            def combo_sig(combos):
+                return tuple(
+                    tuple(str(x) for x in c)
+                    for c in combos
+                    if isinstance(c, (list, tuple)) and len(c) >= 2
+                )
+
+            current_sig = combo_sig(variation["combos"])
+            previous = [
+                v for v in history.get("videos", [])
+                if str(v.get("seed") or "") != current_seed
+            ][-window:]
+            repeated = any(combo_sig(v.get("combos") or []) == current_sig for v in previous)
+            check(
+                "形式组合不与最近N个重复",
+                not repeated,
+                "未重复" if not repeated else "与最近视频完全重复",
+                hard=True,
+            )
+        else:
+            check("形式组合不与最近N个重复", True, "未启用变化引擎，跳过", hard=False)
+
+        report = {
+            "video": str(video_path),
+            "script": str(script_path),
+            "passed": not hard_fail[0],
+            "duration": duration,
+            "checks": checks,
+            "problems": problems,
+        }
+        report_path = video_path.with_name(video_path.stem + ".qa.json")
+        try:
+            report_path.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            dim(f"  质检报告：{rel(report_path)}")
+        except OSError as exc:
+            warn(f"  质检报告写入失败：{exc}")
+
     print()
     if hard_fail[0]:
         fail(f"[节点5] 质检未通过：存在 {len(problems)} 项问题，需修复后重跑。")
@@ -7125,6 +9587,36 @@ def setup_check_and_install(args):
     results["numpy"] = numpy_ok
     line("warn" if not numpy_ok else True, "numpy（可选，像素分析加速）", "" if numpy_ok else "未安装；仍可运行，但质检会慢很多")
 
+    node_version = _node_version()
+    node_ok = _node_version_ok(node_version)
+    results["node"] = True if node_ok else "warn"
+    line(
+        True if node_ok else "warn",
+        "Node.js（Remotion 可选）",
+        ".".join(str(x) for x in node_version) if node_ok
+        else "未安装或版本过低（需要 20.19+ / 22.13+ / 24+）",
+    )
+    npm_bin = _npm_bin()
+    npm_code, npm_out = try_capture([npm_bin, "-v"], timeout=20) if npm_bin else (-1, "")
+    npm_ok = bool(npm_bin)
+    results["npm"] = True if npm_ok else "warn"
+    line(
+        True if npm_ok else "warn",
+        "npm（Remotion 可选）",
+        npm_out.strip() if npm_ok else (npm_bin or "未安装"),
+    )
+    remotion_dir = Path(arg_str(args, "remotion-dir") or "remotion-video")
+    remotion_ok = (
+        (remotion_dir / "package.json").exists()
+        and (remotion_dir / "node_modules" / "@remotion" / "cli").exists()
+    )
+    results["remotion"] = True if remotion_ok else "warn"
+    line(
+        True if remotion_ok else "warn",
+        "Remotion 项目依赖（可选）",
+        str(remotion_dir) if remotion_ok else f"未安装：cd {remotion_dir} && npm install",
+    )
+
     print()
     if check_only:
         missing = [k for k, v in results.items() if not v and k != "numpy"]
@@ -7178,6 +9670,24 @@ def setup_check_and_install(args):
                 did_anything = True
             except Exception:
                 fail("安装失败，请手动执行：py -3 -m pip install --upgrade edge-tts")
+
+    if not remotion_ok:
+        print(f"\n{_C['yellow']}Remotion 后端（可选）尚未就绪。{_C['reset']}")
+        print(f"  安装依赖：cd {remotion_dir} && npm install")
+        print("  首次渲染会下载 Chrome Headless Shell；也可用 --remotion-browser 指定系统 Chrome。")
+        if node_ok and npm_ok and ask("现在安装 Remotion 依赖（npm install）？"):
+            try:
+                subprocess.run([npm_bin, "install"], cwd=str(remotion_dir), check=True)
+                did_anything = True
+            except Exception:
+                try:
+                    subprocess.run(
+                        [os.environ.get("COMSPEC", "cmd.exe"), "/c", npm_bin, "install"],
+                        cwd=str(remotion_dir), check=True,
+                    )
+                    did_anything = True
+                except Exception:
+                    fail(f"Remotion 依赖安装失败，请手动执行：cd {remotion_dir} && npm install")
 
     if not results["ffmpeg"]:
         print(f"\n{_C['yellow']}ffmpeg 未安装，请任选一种方式：{_C['reset']}")
@@ -7236,10 +9746,21 @@ BGM：设置 JAMENDO_CLIENT_ID 后按脚本 meta.bgm 自动选曲下载；
 其它：[--html index.html] [--video output/x.mp4] [--force-node2] [--clean]
       [--skip-node2] [--skip-node4] [--no-bgm] [--no-duck] [--rate +4%]
       [--voice zh-CN-YunyangNeural] [--pitch -6Hz] [--no-voice-style]
-      [--no-sfx] [--sfx-volume 1.0] [--no-bgm-arc] [--no-voice-fx]
-      [--no-retime] [--force-retime] [--node2-mode template|llm] [--no-transition-check]
-       [--theme midnight] [--subs burn|sidecar|none] [--list-themes]
+      [--voice-preset default|deep] [--voice-layers] [--sentence-gap 0.45] [--hook-lead-in 0.6]
+      [--no-sfx] [--sfx-volume 1.0] [--no-bgm-arc] [--no-voice-fx] [--no-loudnorm]
+      [--no-retime] [--force-retime] [--no-fit-duration] [--fit-max-speedup 35] [--no-duration-gate]
+      [--node2-mode template|llm] [--no-transition-check]
+       [--theme midnight] [--subs burn|sidecar|none] [--subs-legacy] [--list-themes]
        [--pick best|random] [--no-repair] [--repair-rounds 1] [--no-sentence-prosody] [--no-bgm-align]
+       [--copy-mode legacy|brutal] [--hook-candidates 5] [--no-hook-score]
+       [--dedupe-threshold 0.82] [--no-dedupe]
+       [--seed xxx] [--no-variation] [--history-file output/history.json] [--history-window 10]
+       [--legacy-motion] [--qa-retries 1] [--qa-legacy]
+       [--qa-duration-min 55] [--qa-duration-max 65]
+       [--render-backend canvas|remotion] [--remotion-dir remotion-video]
+       [--remotion-composition ScriptVideo] [--remotion-crf 18] [--remotion-scale 1]
+       [--remotion-fps 30] [--remotion-image-format png|jpeg]
+       [--remotion-concurrency 0] [--remotion-browser <chrome路径>]
        [--workflow] [--help]
 
 环境与工作流详情：py -3 main.py --workflow
@@ -7249,10 +9770,207 @@ BGM：设置 JAMENDO_CLIENT_ID 后按脚本 meta.bgm 自动选曲下载；
 def copy_llm_args(args):
     """把模型相关参数原样传给节点1/2。"""
     out = {}
-    for key in ("model", "max-tokens", "temperature", "prompt-dir", "no-repair", "repair-rounds", "pick"):
+    for key in (
+        "model", "max-tokens", "temperature", "prompt-dir", "no-repair", "repair-rounds", "pick",
+        "copy-mode", "hook-candidates", "no-hook-score", "dedupe-threshold", "no-dedupe",
+        "seed", "no-variation", "history-file", "history-window", "legacy-motion",
+        "__qa-compress-note",
+    ):
         if key in args:
             out[key] = args[key]
     return out
+
+
+def _narration_stats(script, args, gap_override=None):
+    """返回 (旁白正文字数, 句数, 句间停顿秒数)。"""
+    scenes = script.get("scenes") if isinstance(script, dict) else []
+    scenes = scenes if isinstance(scenes, list) else []
+    chars = 0
+    sentences = 0
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        narration = str(scene.get("narration") or "")
+        chars += narration_chars(narration)
+        if narration.strip():
+            sentences += max(1, len(_split_sentences_keep(narration)))
+    gap = float(gap_override if gap_override is not None else arg_num(args, "sentence-gap", 0.45))
+    lead = float(arg_num(args, "hook-lead-in", 0.6))
+    pause = gap * max(0, sentences - 1) + lead
+    return chars, sentences, pause
+
+
+def estimate_script_seconds(script, args):
+    """渲染前的保守时长估算：字数/语速 + 句间停顿 + 场景余量。"""
+    chars, _sentences, pause = _narration_stats(script, args)
+    scenes = script.get("scenes") if isinstance(script, dict) else []
+    scene_count = len(scenes) if isinstance(scenes, list) else 0
+    rate = 1 + parse_rate_percent(arg_str(args, "rate") or "+4%") / 100.0
+    speech = chars / max(1.0, DENSITY_REF * rate)
+    return speech * 1.08 + pause + 0.3 * scene_count
+
+
+def duration_repair_note(script, target_seconds, hard_max, actual, args, gap_override=None):
+    """给节点1 的压缩改稿指令，明确字数预算。"""
+    chars, _sentences, pause = _narration_stats(script, args, gap_override)
+    budget = max(120, int((float(target_seconds) - pause - 1.0) * DENSITY_MAX))
+    return (
+        "## 时长修复（本次唯一目标）\n"
+        f"上一版成片 {float(actual):.2f}s，超过硬上限 {float(hard_max):g}s；当前旁白 {chars} 字。\n"
+        f"请把旁白总字数压到 {budget} 字以内（去标点口径），目标成片约 {float(target_seconds):.0f}s。\n"
+        f"句间停顿已占约 {pause:.1f}s，不要把字数顶满。\n"
+        "优先删除次要例子、重复解释、形容词和套话；保留钩子数字/期限、定律或效应（含年份/人物）、"
+        "5–6 条解法、首尾回环。不要改场景数量、id、role、elements 结构。"
+    )
+
+
+def compress_script_for_duration(args, script_path, target_seconds, hard_max, actual=None):
+    """只压缩旁白、保留场景结构；成功写入脚本并返回 True。"""
+    if yaml is None:
+        return False
+    script_path = Path(script_path)
+    try:
+        parsed = read_yaml(script_path)
+    except Exception as exc:
+        warn(f"[时长闸门] 读取脚本失败，无法压缩：{exc}")
+        return False
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("scenes"), list):
+        return False
+    scenes = parsed["scenes"]
+    chars, _sentences, pause = _narration_stats(parsed, args)
+    budget = max(120, int((float(target_seconds) - pause - 1.0) * DENSITY_MAX))
+    if chars <= budget:
+        return False
+    actual = float(actual if actual is not None else estimate_script_seconds(parsed, args))
+    note = duration_repair_note(parsed, target_seconds, hard_max, actual, args)
+    meta_obj = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+    topic = str(meta_obj.get("title") or "")
+    prompt_dir = arg_str(args, "prompt-dir") or None
+    try:
+        system_prompt = read_prompt("node1-editor.md", prompt_dir)
+    except (Exception, SystemExit) as exc:
+        warn(f"[时长闸门] 读取改稿提示词失败：{exc}")
+        return False
+    system_prompt += (
+        "\n\n## 本次改稿的唯一任务：压缩时长\n"
+        "只允许修改 scenes[].narration，以及与旁白同步的 scenes[].highlight。"
+        "不要改场景数量、id、role、visual_form、elements 的结构、数字/标签/图表数据。"
+        "输出完整 YAML，不要解释。"
+    )
+    script_text = script_path.read_text(encoding="utf-8")
+    user_prompt = (
+        f"选题：{topic}\n目标时长：{float(target_seconds):g} 秒\n\n{note}\n\n"
+        f"## 当前脚本 YAML\n{script_text}\n\n请输出压缩后的完整 YAML。"
+    )
+    opts = resolve_deepseek_options(args, NODE1_MAX_TOKENS)
+    try:
+        result = call_deepseek_with_retry(
+            "节点1", opts["api_key"], opts["base_url"], opts["model"],
+            system_prompt, user_prompt, opts["max_tokens"], 0.3, opts["stall_ms"],
+        )
+    except (Exception, SystemExit) as exc:
+        warn(f"[时长闸门] 压缩改稿请求失败，保留原脚本：{exc}")
+        return False
+    new_text = strip_fence(result.get("content") or "")
+    if not new_text:
+        return False
+    try:
+        new_parsed = yaml.safe_load(new_text)
+    except Exception as exc:
+        warn(f"[时长闸门] 压缩输出的 YAML 无法解析，保留原脚本：{exc}")
+        return False
+    if not isinstance(new_parsed, dict) or not isinstance(new_parsed.get("scenes"), list):
+        return False
+    if len(new_parsed["scenes"]) != len(scenes):
+        warn("[时长闸门] 改稿改变了场景数量，保留原脚本。")
+        return False
+    new_chars, _new_sentences, _new_pause = _narration_stats(new_parsed, args)
+    if new_chars > budget * 1.10 or new_chars >= chars:
+        warn(f"[时长闸门] 改稿压缩不足（{chars} → {new_chars} 字，目标 ≤{budget}），保留原脚本。")
+        return False
+    original_by_id = {
+        str(scene.get("id")): scene
+        for scene in scenes
+        if isinstance(scene, dict) and scene.get("id")
+    }
+    merged_scenes = []
+    for scene in new_parsed["scenes"]:
+        if not isinstance(scene, dict):
+            return False
+        original = original_by_id.get(str(scene.get("id") or ""))
+        merged_scenes.append({**original, **scene} if original else scene)
+    new_parsed["scenes"] = merged_scenes
+    original_meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+    meta = dict(original_meta)
+    if isinstance(new_parsed.get("meta"), dict):
+        meta.update(new_parsed["meta"])
+    requested = _num(meta.get("duration_requested")) or _num(arg_num(args, "duration", 60)) or 60
+    if requested > float(target_seconds):
+        requested = float(target_seconds)
+    meta["duration_requested"] = requested
+    meta.pop("retimed", None)
+    meta.pop("voice_rate", None)
+    meta.pop("voice_fit", None)
+    new_parsed["meta"] = meta
+    for scene in new_parsed["scenes"]:
+        if isinstance(scene, dict):
+            _sync_highlights(scene)
+    backup = script_path.with_name(
+        f"{script_path.stem}.pre-compress-{int(time.time())}{script_path.suffix}"
+    )
+    try:
+        shutil.copyfile(script_path, backup)
+    except OSError:
+        pass
+    script_path.write_text(
+        yaml.safe_dump(new_parsed, allow_unicode=True, sort_keys=False, width=240, default_flow_style=None),
+        encoding="utf-8",
+    )
+    ok(f"[时长闸门] 旁白压缩 {chars} → {new_chars} 字（目标 ≤{budget}），备份 {rel(backup)}")
+    return True
+
+
+def apply_duration_gate(args, script_path, requested_duration, retimed):
+    """在节点3 前检查真实配音/保守估算时长，超限先压缩并重录。"""
+    try:
+        parsed = read_yaml(script_path)
+    except Exception:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+    actual = _num(meta.get("duration")) or 0
+    if not retimed or arg_bool(args, "no-retime"):
+        actual = max(actual, estimate_script_seconds(parsed, args))
+    dmax = float(arg_num(args, "qa-duration-max", 65))
+    if actual <= dmax:
+        return False
+    warn(f"[时长闸门] 预计/实际 {actual:.2f}s > 上限 {dmax:g}s，在节点3 前拦截。")
+    requested = _num(meta.get("duration_requested")) or _num(requested_duration) or 60
+    target = max(40.0, min(float(requested), dmax - 2.0))
+    changed = compress_script_for_duration(args, script_path, target, dmax, actual)
+    retimed_again = False
+    if changed and not arg_bool(args, "no-retime") and not arg_bool(args, "skip-node4"):
+        try:
+            retime_script_to_voice(args)
+            retimed_again = True
+        except SystemExit:
+            raise
+        except Exception as exc:
+            warn(f"[时长闸门] 压缩后重新配音失败：{exc}")
+        try:
+            parsed = read_yaml(script_path)
+            meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+            actual = _num(meta.get("duration")) or estimate_script_seconds(parsed, args)
+        except Exception:
+            actual = estimate_script_seconds(parsed, args)
+    if actual > dmax:
+        die(
+            f"[时长闸门] 压缩后仍为 {actual:.2f}s > {dmax:g}s，已停止渲染。"
+            "请精简文案或调小 --sentence-gap；确需放行加 --no-duration-gate。"
+        )
+    ok(f"[时长闸门] 通过：{actual:.2f}s ≤ {dmax:g}s。")
+    return bool(changed or retimed_again)
 
 
 def step(n, title):
@@ -7302,11 +10020,12 @@ def run_pipeline(args):
             node1_generate({**common, "book": point_file, "index": arg_num(args, "index", 1)})
     elif auto_topic and not arg_bool(args, "skip-node1"):
         step(1, "DeepSeek 自行选题并生成视频脚本")
-        auto_topic_generate(
+        selected_topic, _, _ = auto_topic_generate(
             {**args, "duration": duration},
             script,
             Path(arg_str(args, "topics-out") or "output/topics.md"),
         )
+        args["__auto-topic-selected"] = selected_topic
         from_llm = True
     elif from_llm:
         dim(f"跳过节点1，直接使用 {rel(script)}")
@@ -7328,6 +10047,13 @@ def run_pipeline(args):
             raise
         except Exception as exc:
             warn(f"场景重排失败，沿用脚本里的估算时间窗：{exc}")
+
+    if (
+        not arg_bool(args, "no-duration-gate")
+        and not arg_bool(args, "qa-legacy")
+        and not arg_bool(args, "skip-node4")
+    ):
+        retimed = apply_duration_gate(args, script, duration, retimed) or retimed
 
     parsed_script = read_yaml(script)
     if not isinstance(parsed_script, dict):
@@ -7370,6 +10096,13 @@ def run_pipeline(args):
     }
     if clean:
         render_args["clean"] = True
+    for key in (
+        "render-backend", "remotion-dir", "remotion-composition", "remotion-crf",
+        "remotion-scale", "remotion-fps", "remotion-image-format",
+        "remotion-concurrency", "remotion-browser", "props", "legacy-motion",
+    ):
+        if key in args:
+            render_args[key] = args[key]
     render_frames(render_args)
 
     if arg_bool(args, "skip-node4"):
@@ -7387,13 +10120,15 @@ def run_pipeline(args):
         "name": base,
     }
     for key in ("bgm-style", "rate", "pitch", "sfx-volume", "bgm-volume", "jamendo-client-id", "voice",
+                "voice-preset", "voice-layers", "sentence-gap", "hook-lead-in",
                 "audio-dir", "jamendo-limit", "tts"):
         if key in args:
             audio_args[key] = args[key]
     if bgm:
         audio_args["bgm"] = bgm
     for flag in ("no-bgm", "no-jamendo", "no-duck", "no-text-normalize", "no-subs",
-                 "no-sfx", "no-bgm-arc", "no-voice-style", "no-voice-fx"):
+                 "no-sfx", "no-bgm-arc", "no-voice-style", "no-voice-fx",
+                 "subs-strict", "subs-legacy", "no-loudnorm"):
         if arg_bool(args, flag):
             audio_args[flag] = True
     if arg_str(args, "subs"):
@@ -7410,6 +10145,12 @@ def run_pipeline(args):
         qa_args["blackdetect"] = True
     if arg_bool(args, "no-transition-check"):
         qa_args["no-transition-check"] = True
+    for key in ("history-file", "history-window", "qa-duration-min", "qa-duration-max"):
+        if key in args:
+            qa_args[key] = args[key]
+    if arg_bool(args, "qa-legacy"):
+        qa_args["qa-legacy"] = True
+    hard_fail = False
     try:
         _, hard_fail = qa_run(qa_args)
         if hard_fail:
@@ -7418,6 +10159,64 @@ def run_pipeline(args):
         raise
     except Exception as exc:
         warn(f"质检执行失败：{exc}")
+
+    retries = int(arg_num(args, "qa-retries", 1))
+    can_regen = (from_llm or auto_topic) and not arg_bool(args, "skip-node1")
+    if hard_fail and not arg_bool(args, "qa-legacy") and retries > 0 and can_regen:
+        attempt = int(args.get("__qa-attempt", 0)) + 1
+        try:
+            shutil.copyfile(
+                script,
+                script.with_name(script.stem + f".qa-fail{attempt}" + script.suffix),
+            )
+            report_path = final_video.with_name(final_video.stem + ".qa.json")
+            if report_path.exists():
+                shutil.copyfile(
+                    report_path,
+                    final_video.with_name(final_video.stem + f".qa-fail{attempt}.json"),
+                )
+        except OSError:
+            pass
+        new_args = dict(args)
+        new_args["__qa-attempt"] = attempt
+        new_args["qa-retries"] = retries - 1
+        new_args["unique"] = False
+        base_seed = arg_str(args, "seed")
+        if base_seed:
+            new_args["seed"] = f"{base_seed}-qa{attempt}"
+        else:
+            new_args.pop("seed", None)
+
+        pinned = arg_str(args, "__auto-topic-selected")
+        if pinned:
+            new_args["topic"] = pinned
+            new_args.pop("auto-topic", None)
+            dim(f"[质检] 重试保留原选题：{pinned}")
+
+        actual_duration = probe_duration(final_video) or 0
+        dmax = float(arg_num(args, "qa-duration-max", 65))
+        if actual_duration > dmax:
+            target = max(40.0, min(float(arg_num(args, "duration", 60)), dmax - 2.0))
+            if compress_script_for_duration(args, script, target, dmax, actual_duration):
+                new_args["skip-node1"] = True
+                new_args.pop("topic", None)
+                new_args.pop("auto-topic", None)
+                dim("[质检] 已压缩现有脚本，保留原选题结构，跳过节点1…")
+            else:
+                new_args["duration"] = max(45.0, min(58.0, dmax - 5.0))
+                gap = float(arg_num(args, "sentence-gap", 0.45))
+                if "sentence-gap" not in args:
+                    gap = 0.35
+                    new_args["sentence-gap"] = gap
+                try:
+                    parsed_for_note = read_yaml(script)
+                except Exception:
+                    parsed_for_note = {}
+                new_args["__qa-compress-note"] = duration_repair_note(
+                    parsed_for_note, new_args["duration"], dmax, actual_duration, args, gap
+                )
+        warn(f"[质检] 未通过，自动重新生成（第 {attempt} 次，剩余 {retries - 1} 次）…")
+        return run_pipeline(new_args)
 
     minutes = (time.time() - t0) / 60
     print("\n" + "─" * 60)

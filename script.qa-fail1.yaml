@@ -1,0 +1,546 @@
+meta:
+  title: 每天被切碎50次，真正的工作不足两小时
+  duration: 66.48
+  fps: 30
+  resolution: 1920x1080
+  primary: '#22d3ee'
+  background: '#06080f'
+  hook_type: 扎心拷问
+  core_message: 你的一天不是没时间，是被切成50片，真正属于你的只有两小时
+  golden_line: 护住90分钟，才是你真正属于自己的两小时
+  visual_motif: 一根完整的时间轴代表一天，被切成50段碎片后散落，全片从完整到碎裂，再到重新聚拢成90分钟的保护区
+  spectacle: 50段碎片同时从屏幕顶端砸落，堆成一座"回神时间"的塔，顶端压着红字"1150分钟"
+  hook_number: 50次
+  law: 注意力切换要交税：每次打断平均23分钟才能回到原思路
+  contrast: 每天被切50次 × 23分钟 = 1150分钟回神，实际专注不足2小时
+  method_steps: [手机放远, 关掉通知, 留90分钟块, 只做一件事, 想摸手机就喝水]
+  audience: 每天被消息轰炸、觉得自己很忙但没有产出的职场人
+  bgm_style: cinematic_epic
+  bgm:
+    song: Time
+    artist: Hans Zimmer
+    version: Inception 原声（纯器乐版）
+    segment_start: 01:23
+    segment_end: 02:05
+    lyric_cue: 01:23 起逐步叠加弦乐，低音提琴持续托底
+    instrumental: true
+    mood: 紧张、克制、逐步上扬
+    bpm: 112
+    jamendo_query: dark ambient tension pulse
+    jamendo_tags: [dark, ambient, instrumental]
+    fallback_queries: [cinematic suspense drone, minimal tech pulse]
+  palette: sand
+  variation:
+    engine: p1
+    seed: 4f765849b0d5
+    palette: sand
+    historyWindow: 10
+    combos:
+    - [倒计时, dial]
+    - [卡片矩阵, rain]
+    - [对比轨道, tracks]
+    - [折线图, area]
+    - [堆叠塔, tower]
+    - [方块拆解, stack]
+    - [聚焦镜头, iris]
+    - [树状拆解, cascade]
+    - [流程分支, pipeline]
+    - [对比分屏, bars]
+    - [聚焦镜头, vignette]
+  duration_requested: 60.0
+  retimed: true
+  voice_rate: +39%
+  voice_fit: {requested: 60.0, before: 86.91, after: 66.48, extra: 35}
+scenes:
+- id: hook
+  start: 0.0
+  end: 4.33
+  role: 钩子
+  emotion: 焦虑
+  visual_form: 倒计时
+  variant: dial
+  transition_in: null
+  narration: 你每天被切碎50次，真正在工作的，不足两小时。
+  highlight: [50次, 不足两小时]
+  elements:
+  - type: countdown
+    number: '50'
+    unit: 次
+    label: 每天被切碎
+    from: 100
+    at: [0.0, 4.33]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 数字从100快速滚落到50，倒计时环缺口从0扩展到60%，尾端在2秒时闪红
+    easing: easeOutCubic
+    focus: true
+    occupancy: 0.7
+    pulse: true
+  - type: caption
+    text: 被切碎
+    at: [0.0, 4.33]
+    position: 数字上方
+    color: '#94a3b8'
+    size: 40
+    motion: 从上方滑入，轻微抖动后定格
+    easing: easeOutBack
+  - type: ring
+    text: 不足两小时
+    at: [0.87, 2.6]
+    position: 数字下方
+    color: '#ef4444'
+    size: 36
+    motion: 在倒计时环闪红时同步出现，从暗到亮
+    easing: easeOutCubic
+  layout: center
+  entrance: scale
+  motion_curve: easeInOutCubic
+  beats:
+  - {t: 0.1, end: 3.52, text: 你每天被切碎50次，真正在工作的，不足两小时。}
+- id: empathy_one
+  start: 4.33
+  end: 12.37
+  role: 共情
+  emotion: 共情
+  visual_form: 卡片矩阵
+  variant: rain
+  transition_in: 缩放推进
+  narration: 消息一条接一条，20条砸下来，你回了3条，回来忘了写到哪。第3次解锁手机，只是为了看一眼时间。
+  highlight: [20条, 第3次解锁]
+  elements:
+  - type: cardgrid
+    groups:
+    - {label: 消息, count: 20}
+    - {label: 回复, count: 3}
+    at: [4.33, 12.37]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 20张卡片从屏幕顶端逐张坠落，带轻微旋转，3张青色卡片在右侧被点亮，其余17张缓慢下沉变灰
+    easing: easeOutCubic
+    focus: true
+    occupancy: 0.65
+  - type: caption
+    text: 第3次
+    at: [9.15, 12.37]
+    position: 画面左下
+    color: '#ef4444'
+    size: 60
+    motion: 在3张回复卡片点亮时同步弹出，脉冲一次
+    easing: easeOutBack
+    pulse: true
+  - type: line
+    text: 代码行
+    at: [4.33, 7.55]
+    position: 画面上方
+    color: '#64748b'
+    motion: 几行简短的代码线条逐行出现，被砸落的卡片打断后闪烁消失
+    easing: easeInOutCubic
+  layout: top
+  entrance: slide
+  motion_curve: easeOutCubic
+  beats:
+  - {t: 4.43, end: 8.55, text: 消息一条接一条，20条砸下来，你回了3条，回来忘了写到哪。}
+  - {t: 9.05, end: 11.98, text: 第3次解锁手机，只是为了看一眼时间。}
+- id: empathy_two
+  start: 12.37
+  end: 16.39
+  role: 共情
+  emotion: 共情
+  visual_form: 对比轨道
+  variant: tracks
+  transition_in: 图形形变
+  narration: 你以为忙了一整天，可真正专注的时间，连两小时都不到。
+  highlight: [忙了一整天, 不到两小时]
+  elements:
+  - type: compare
+    left: {label: 你以为的忙, value: 8, unit: 小时}
+    right: {label: 真正专注, value: 2, unit: 小时}
+    at: [12.37, 16.39]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 左右两条轨道从同一原点出发，左侧轨道快速延伸到8小时，右侧轨道只走了四分之一就停下
+    easing: easeInOutCubic
+    focus: true
+    occupancy: 0.6
+  - type: caption
+    text: 不足2小时
+    at: [14.79, 16.39]
+    position: 右侧轨道终点
+    color: '#ef4444'
+    size: 48
+    motion: 轨道停下后弹出，闪烁两次
+    easing: easeOutBack
+    pulse: true
+  - type: dots
+    text: 时间流
+    at: [12.37, 16.39]
+    position: 轨道上方
+    color: '#475569'
+    motion: 一串小圆点沿轨道流动，左侧密集移动，右侧稀疏停滞
+    easing: easeInOutCubic
+  layout: right
+  entrance: wipe
+  motion_curve: smootherstep
+  beats:
+  - {t: 12.47, end: 16.03, text: 你以为忙了一整天，可真正专注的时间，连两小时都不到。}
+- id: breakdown_one
+  start: 16.39
+  end: 23.4
+  role: 拆解
+  emotion: 拆解
+  visual_form: 折线图
+  variant: area
+  transition_in: 图形形变
+  narration: 这不是你懒，是注意力切换要交税。每次被打断，再回到原来的思路，平均要23分钟。
+  highlight: [交税, 23分钟]
+  elements:
+  - type: linechart
+    points: [100, 85, 55, 35, 28, 30]
+    unit: '%'
+    y_label: 注意力
+    trend: down
+    x_labels: [被打断, 23分钟后]
+    at: [16.39, 23.4]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 折线从左上角快速下降然后在底部缓慢回升，23分钟刻度处停住，端点荧光点闪烁
+    easing: easeOutCubic
+    focus: true
+    occupancy: 0.55
+  - type: caption
+    text: 23分钟
+    at: [19.2, 23.4]
+    position: 折线回升处
+    color: '#ef4444'
+    size: 64
+    motion: 在端点停住处弹出，红色光晕扩大一次
+    easing: easeOutBack
+    pulse: true
+  - type: line
+    text: 中断线
+    at: [16.39, 19.2]
+    position: 折线起点
+    color: '#ef4444'
+    motion: 一条红色竖虚线从折线起点垂直切下，标出被打断的瞬间
+    easing: easeInOutCubic
+  layout: left
+  entrance: scale
+  motion_curve: easeOutCubic
+  beats:
+  - {t: 16.49, end: 18.99, text: 这不是你懒，是注意力切换要交税。}
+  - {t: 19.49, end: 23.07, text: 每次被打断，再回到原来的思路，平均要23分钟。}
+- id: breakdown_two
+  start: 23.4
+  end: 31.06
+  role: 拆解
+  emotion: 拆解
+  visual_form: 堆叠塔
+  variant: tower
+  transition_in: 时间轴延伸
+  narration: 一天被切50次，每次23分钟——50乘23，是1150分钟。这些时间不是干活，是在回神。
+  highlight: [50次, 23分钟, 1150分钟]
+  elements:
+  - type: tower
+    values: [23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23]
+    at: [23.4, 31.06]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 50层方块从底部逐层向上堆叠，每层标23分钟，顶部3层在25秒时变红
+    easing: easeOutCubic
+    focus: true
+    occupancy: 0.7
+    spectacle: true
+  - type: counter
+    text: '1150'
+    at: [27.23, 31.06]
+    position: 塔顶
+    color: '#ef4444'
+    size: 72
+    motion: 数字从0滚动到1150，伴随红色光晕脉冲
+    easing: easeOutCubic
+    pulse: true
+  - type: caption
+    text: 不是干活
+    at: [23.4, 27.23]
+    position: 画面上方
+    color: '#94a3b8'
+    size: 40
+    motion: 从暗到亮缓慢浮现
+    easing: easeInOutCubic
+  layout: bottom
+  entrance: slide
+  motion_curve: easeOutBack
+  beats:
+  - {t: 23.5, end: 28.09, text: 一天被切50次，每次23分钟——50乘23，是1150分钟。}
+  - {t: 28.58, end: 30.74, text: 这些时间不是干活，是在回神。}
+- id: breakdown_three
+  start: 31.06
+  end: 36.4
+  role: 拆解
+  emotion: 拆解
+  visual_form: 方块拆解
+  variant: stack
+  transition_in: 图形形变
+  narration: 换句话说，你每天上班8小时，其中6小时在重启大脑，真正的产出只有2小时。
+  highlight: [8小时, 6小时, 2小时]
+  elements:
+  - type: parts
+    groups:
+    - {label: 重启大脑, count: 6}
+    - {label: 真正产出, count: 2}
+    at: [31.06, 36.4]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 一整块8小时的长条被拆成8个小方块，6块灰色堆在左边，2块青色堆在右边，灰色块慢慢变暗
+    easing: easeOutCubic
+    focus: true
+    occupancy: 0.6
+  - type: caption
+    text: 2小时
+    at: [34.27, 36.4]
+    position: 画面右下
+    color: '#22d3ee'
+    size: 56
+    motion: 青色方块亮起时同步弹出
+    easing: easeOutBack
+  - type: caption
+    text: 6小时重启
+    at: [32.13, 35.33]
+    position: 画面左上
+    color: '#64748b'
+    size: 40
+    motion: 灰色块堆叠时浮现
+    easing: easeInOutCubic
+  layout: right
+  entrance: scale
+  motion_curve: easeOutCubic
+  beats:
+  - {t: 31.16, end: 36.09, text: 换句话说，你每天上班8小时，其中6小时在重启大脑，真正的产出只有2小时。}
+- id: insight_one
+  start: 36.4
+  end: 41.65
+  role: 顿悟
+  emotion: 顿悟
+  visual_form: 聚焦镜头
+  variant: iris
+  transition_in: 缩放推进
+  narration: 所以问题不是你不努力，是你把时间切成50片，每一片都薄得扛不住深度思考。
+  highlight: [50片, 深度思考]
+  elements:
+  - type: spotlight
+    text: 50片
+    sub: 扛不住深度思考
+    at: [36.4, 41.65]
+    position: 画面中央
+    color: '#ef4444'
+    motion: 其余画面压暗，光圈从外向内收缩到"50片"两个字上，镜头推进放大
+    easing: easeInOutCubic
+    focus: true
+    occupancy: 0.5
+    pulse: true
+  - type: caption
+    text: 不是不努力
+    at: [36.4, 39.55]
+    position: 画面上方
+    color: '#94a3b8'
+    size: 40
+    motion: 在光圈收缩前浮现，随后被压暗
+    easing: easeInOutCubic
+  - type: particles
+    text: 碎片
+    at: [36.4, 41.65]
+    position: 光圈外围
+    color: '#475569'
+    motion: 50个细小碎片在光圈外缓慢漂浮，逐渐被吸向中央
+    easing: easeInOutCubic
+  layout: top
+  entrance: fade
+  motion_curve: easeInOutCubic
+  beats:
+  - {t: 36.5, end: 41.28, text: 所以问题不是你不努力，是你把时间切成50片，每一片都薄得扛不住深度思考。}
+- id: insight_two
+  start: 41.65
+  end: 46.61
+  role: 顿悟
+  emotion: 顿悟
+  visual_form: 树状拆解
+  variant: cascade
+  transition_in: 知识树生长
+  narration: 明天先做一件事：手机放到另一个房间，关掉所有通知，只留一个紧急通道。
+  highlight: [手机放远, 关掉通知]
+  elements:
+  - type: tree
+    root: 护住注意力
+    nodes: [手机放到另一个房间, 关掉所有通知, 只留一个紧急通道]
+    at: [41.65, 46.61]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 根节点先亮起，然后三个子节点从根节点向下逐层生长，第一个节点在37秒亮，第二个在38.5秒亮，第三个在40秒亮
+    easing: easeOutBack
+    focus: true
+    occupancy: 0.6
+  - type: caption
+    text: 三步
+    at: [41.65, 43.63]
+    position: 画面上方
+    color: '#94a3b8'
+    size: 36
+    motion: 树根亮起时出现
+    easing: easeInOutCubic
+  - type: line
+    text: 连接线
+    at: [41.65, 46.61]
+    position: 节点之间
+    color: '#22d3ee'
+    motion: 细线从根节点延伸出，连接到每个子节点，带光晕流动
+    easing: easeInOutCubic
+  layout: right
+  entrance: slide
+  motion_curve: easeOutBack
+  beats:
+  - {t: 41.75, end: 46.25, text: 明天先做一件事：手机放到另一个房间，关掉所有通知，只留一个紧急通道。}
+- id: insight_three
+  start: 46.61
+  end: 52.83
+  role: 顿悟
+  emotion: 顿悟
+  visual_form: 流程分支
+  variant: pipeline
+  transition_in: 图形形变
+  narration: 然后给自己90分钟的完整块，只做最重要的一件事。想摸手机，就起来喝口水。
+  highlight: [90分钟, 只做一件事]
+  elements:
+  - type: pipeline
+    nodes: [设定90分钟, 只做一件事, 想摸手机, 喝口水]
+    at: [46.61, 52.83]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 一条管线从左向右流动，90分钟块先是完整的青色长条，中途出现一个分叉，想摸手机时节点变红，然后绿色分支指向喝口水
+    easing: easeOutCubic
+    focus: true
+    occupancy: 0.6
+  - type: caption
+    text: 90分钟
+    at: [46.61, 50.34]
+    position: 管线起点
+    color: '#22d3ee'
+    size: 56
+    motion: 管道起点亮起时弹出
+    easing: easeOutBack
+  - type: caption
+    text: 只做一件事
+    at: [49.09, 52.83]
+    position: 管线中段
+    color: '#94a3b8'
+    size: 36
+    motion: 在流动到中段时浮现
+    easing: easeInOutCubic
+  layout: offset
+  entrance: scale
+  motion_curve: easeInOutCubic
+  beats:
+  - {t: 46.71, end: 50.01, text: 然后给自己90分钟的完整块，只做最重要的一件事。}
+  - {t: 50.51, end: 52.44, text: 想摸手机，就起来喝口水。}
+- id: insight_four
+  start: 52.83
+  end: 58.45
+  role: 顿悟
+  emotion: 顿悟
+  visual_form: 对比分屏
+  variant: bars
+  transition_in: 擦除
+  narration: 一天护住两个90分钟，你的产出就能翻倍。不是加时间，是保时间。
+  highlight: [两个90分钟, 翻倍]
+  elements:
+  - type: split
+    left: {label: 以前, value: 2, unit: 小时}
+    right: {label: 护住后, value: 4, unit: 小时}
+    at: [52.83, 58.45]
+    position: 画面中央
+    color: '#22d3ee'
+    accent_color: '#ef4444'
+    motion: 左右分屏同时出现柱状图，左侧2小时柱子在47秒停下，右侧4小时柱子在50秒完成增长，两根柱子顶端各有数字标注
+    easing: easeOutCubic
+    focus: true
+    occupancy: 0.6
+  - type: caption
+    text: 产出翻倍
+    at: [54.7, 58.45]
+    position: 右屏上方
+    color: '#22d3ee'
+    size: 48
+    motion: 右侧柱子完成时弹出，带青色光晕
+    easing: easeOutBack
+  - type: caption
+    text: 不是加时间
+    at: [52.83, 56.57]
+    position: 左屏下方
+    color: '#94a3b8'
+    size: 36
+    motion: 左侧柱子停止时浮现
+    easing: easeInOutCubic
+  layout: bottom
+  entrance: fade
+  motion_curve: easeOutBack
+  beats:
+  - {t: 52.93, end: 55.73, text: 一天护住两个90分钟，你的产出就能翻倍。}
+  - {t: 56.23, end: 58.06, text: 不是加时间，是保时间。}
+- id: golden
+  start: 58.45
+  end: 66.48
+  role: 金句
+  emotion: 金句
+  visual_form: 聚焦镜头
+  variant: vignette
+  transition_in: 缩放推进
+  narration: 50次切碎，拼不回一整天。护住90分钟，才是你真正属于自己的两小时。
+  highlight: [护住90分钟, 两小时]
+  elements:
+  - type: title
+    text: 护住90分钟
+    at: [59.45, 64.47]
+    position: 画面中央
+    color: '#22d3ee'
+    size: 96
+    motion: 从暗到亮缓慢浮现，2秒后完全亮起，保持到57秒
+    easing: easeOutCubic
+    focus: true
+    occupancy: 0.55
+  - type: title
+    text: 才是你的两小时
+    at: [61.46, 64.47]
+    position: 画面中央偏下
+    color: '#ffffff'
+    size: 56
+    motion: 在上一句完全亮起后，从下方升入
+    easing: easeOutBack
+  - type: ring
+    text: 聚拢
+    at: [58.45, 64.47]
+    position: 标题后方
+    color: '#22d3ee'
+    motion: 50片碎散的线条从四面八方重新聚拢，合并成一个完整的圆环
+    easing: easeInOutCubic
+    pulse: true
+  - type: caption
+    text: 50次切碎
+    at: [58.45, 61.46]
+    position: 画面上方
+    color: '#64748b'
+    size: 32
+    motion: 碎片开始聚拢时从暗处浮现，随后隐去
+    easing: easeInOutCubic
+  layout: left
+  entrance: wipe
+  motion_curve: easeInOutCubic
+  beats:
+  - {t: 58.55, end: 60.9, text: 50次切碎，拼不回一整天。}
+  - {t: 61.42, end: 65.08, text: 护住90分钟，才是你真正属于自己的两小时。}
